@@ -45,6 +45,9 @@ The digest is the same on every run and every machine. It's pinned in the tests.
 
 ## What's built so far
 
+- **Latency measurement**: per-command p50 / p99 / p99.9 / max for each kind of command
+  (`lob latency`, HdrHistogram), the clock's own cost reported alongside, runs that alternate
+  between the books on a pinned core, and criterion microbenchmarks at fixed book depths.
 - **Fast book**: a slab of orders with an intrusive doubly linked list per price level, O(1)
   cancel by id, and a cached best level. It produces identical events to the reference book over
   15 million differential-tested commands.
@@ -80,8 +83,19 @@ On realistic flow both books spend most of their time on the same costs (hashing
 emitting events). The fast book's structure guarantees cancels cost the same however deep a
 queue gets. Details are in [DESIGN.md](DESIGN.md) (D22).
 
+Latency per cancel (`scripts/latency.sh`, release, one pinned laptop core, ns, includes about 14 ns of clock cost):
+
+| Workload | Reference p50 / p99 | Fast p50 / p99 |
+|---|---|---|
+| Generated order flow, 2M commands | 106 / 179 | 49 / 106 |
+| One queue of 10,000 orders, cancelled in random order | 1,086 / 3,557 | 44 / 61 |
+
+Limit, market and reject latencies are the same in both books. Both books also show a worst case of
+several milliseconds: the set of used order ids rehashes as it grows. That's the next thing to remove
+([DESIGN.md](DESIGN.md), M5 results).
+
 ## Planned
 
-- p50 / p99 / p99.9 latency per operation, with zero allocations on the hot path.
+- Zero allocations on the hot path, and no multi-millisecond pauses.
 - Replay of a real NASDAQ ITCH session.
 - A lock-free pipeline between gateway, matching and market data threads.
