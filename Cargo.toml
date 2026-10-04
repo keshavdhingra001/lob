@@ -17,3 +17,7 @@ opt-level = 1
 
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "book"
+harness = false
