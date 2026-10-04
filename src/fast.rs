@@ -95,6 +95,11 @@ struct LevelNode {
     count: u32,
 }
 
+// Two orders, or two levels, per 64-byte cache line (D34). A new field that pushed either
+// past 32 bytes would halve that, so it has to be a deliberate change here.
+const _: () = assert!(std::mem::size_of::<Node>() == 32);
+const _: () = assert!(std::mem::size_of::<LevelNode>() == 32);
+
 pub struct FastBook {
     config: BookConfig,
     orders: Slab<Node>,
