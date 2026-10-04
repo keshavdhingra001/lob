@@ -359,12 +359,18 @@ produces identical events, proven by differential testing over 15M commands (D22
 ### D27: Method: warm-up, pinned core, median of 5 runs, machine printed
 - **What:** `scripts/latency.sh [cpu] [runs]` builds release, generates three seeded journals and
   runs `taskset -c <cpu> lob latency`. Each book gets one untimed warm-up pass, then N runs on
-  fresh books. The run printed is the one with the median overall p99; the other runs' p99s are
-  printed too, so the spread is visible. The output starts with the CPU, kernel, governor,
+  fresh books, **alternating books** (ref, fast, ref, fast, ...). The run printed is the one with the median overall p99; the other runs' p99s are
+  printed too, each with its clock floor (`p99/floor`), so the spread is visible. The output starts with the CPU, kernel, governor,
   turbo setting and the CPUs the process may run on.
 - **Why the median run, not the median of each column:** every number in a table then comes from one real run.
 - **What isn't controlled:** the governor (`powersave` with the `balance_performance` hint; changing it needs root), turbo, and the
   SMT sibling (cpu 6 shares cpu 2's core).
+- **Why alternate:** the first version ran all 5 reference runs and then all 5 fast runs. The clock
+  floor, which should be constant, moved between 14 and 23 ns across those runs: the CPU's
+  frequency was changing under the `powersave` governor. In one run the reference book had a 23 ns floor and the fast book 15 ns, so
+  the comparison was unfair, and it showed up as a fake "fast book has a worse p99.9 on crossing
+  limits" (2.4 µs vs 0.8 µs). Alternating removed it (933 vs 917 ns). The floor is also a free frequency
+  gauge: compare only runs whose floors match.
 - **Lesson learned while building it:** another project's `cargo build` running on the same laptop made every
   percentile 2–3x worse and the tails 5–10x worse. Results are only taken when the load average is low, and
   the run-to-run p99 spread printed with each table is how to tell a quiet run from a noisy one.

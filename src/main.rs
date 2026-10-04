@@ -15,7 +15,7 @@ use std::process::ExitCode;
 
 use lob::gen::{GenConfig, Generator};
 use lob::journal::{read_journal, JournalWriter};
-use lob::latency::{measure_runs, median_run, table};
+use lob::latency::{measure_interleaved, median_run, table, Report};
 use lob::replay::{replay, replay_timed};
 use lob::scenario::run_line;
 use lob::{Command, FastBook, OrderBook, RefBook};
@@ -200,8 +200,8 @@ fn bench(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Per-command latency for both books (D23–D27): a warm-up pass, then `runs` timed runs
-/// on fresh books, reporting the run with the median overall p99.
+/// Per-command latency for both books (D23–D27): a warm-up pass per book, then `runs`
+/// timed runs per book on fresh books, alternating, reporting the run with the median p99.
 fn latency(path: &str, runs: &str) -> Result<(), String> {
     let runs: usize = match runs.parse() {
         Ok(n) if n > 0 => n,
@@ -212,20 +212,28 @@ fn latency(path: &str, runs: &str) -> Result<(), String> {
     let commands = &journal.commands;
     print!("{}", machine());
     println!(
-        "{} commands from {path}; warm-up, then {runs} runs per book; showing the run with the median p99\n",
+        "{} commands from {path}; warm-up, then {runs} runs per book, alternating books; showing the run with the median p99\n",
         commands.len()
     );
-    fn report<B: OrderBook>(name: &str, commands: &[Command], runs: usize) {
-        let reports = measure_runs::<B>(commands, runs);
-        let p99s: Vec<String> = reports
+    // Each run's p99 next to its clock floor (p50 of an empty timed window): a higher
+    // floor means the CPU was running slower for that run, so compare runs with similar floors.
+    let report = |name: &str, reports: &[Report]| {
+        let runs: Vec<String> = reports
             .iter()
-            .map(|r| r.all.value_at_quantile(0.99).to_string())
+            .map(|r| {
+                format!(
+                    "{}/{}",
+                    r.all.value_at_quantile(0.99),
+                    r.clock.value_at_quantile(0.5)
+                )
+            })
             .collect();
-        println!("{name} (overall p99 per run: {} ns)", p99s.join(" "));
-        println!("{}\n", table(median_run(&reports)));
-    }
-    report::<RefBook>("reference", commands, runs);
-    report::<FastBook>("fast", commands, runs);
+        println!("{name} (p99/floor per run: {} ns)", runs.join(" "));
+        println!("{}\n", table(median_run(reports)));
+    };
+    let (reference, fast) = measure_interleaved::<RefBook, FastBook>(commands, runs);
+    report("reference", &reference);
+    report("fast", &fast);
     Ok(())
 }
 

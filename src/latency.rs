@@ -149,17 +149,31 @@ pub fn measure<B: OrderBook>(commands: &[Command]) -> Report {
     report
 }
 
-/// Run `measure` `runs` times after one untimed warm-up pass, and return every run.
-/// The warm-up brings the CPU out of idle frequency and fills the caches and branch
-/// predictors, so run 1 isn't systematically slower than the rest (D27).
-pub fn measure_runs<B: OrderBook>(commands: &[Command], runs: usize) -> Vec<Report> {
+/// One untimed pass over `commands` on a fresh book. It brings the CPU out of its idle
+/// frequency and fills the caches and branch predictors, so the first timed run isn't
+/// systematically slower than the rest (D27).
+pub fn warm_up<B: OrderBook>(commands: &[Command]) {
     let mut book = B::with_config(Default::default());
     let mut events = Vec::with_capacity(64);
     for cmd in commands {
         events.clear();
         book.apply(cmd, &mut events);
     }
-    (0..runs).map(|_| measure::<B>(commands)).collect()
+}
+
+/// Measure books `A` and `B` alternately, `runs` times each, after warming up both (D27).
+/// A laptop CPU changes frequency with load and heat, so measuring all of A and then all
+/// of B can put the two books in different frequency phases. Alternating gives each pair of
+/// runs the same conditions.
+pub fn measure_interleaved<A: OrderBook, B: OrderBook>(
+    commands: &[Command],
+    runs: usize,
+) -> (Vec<Report>, Vec<Report>) {
+    warm_up::<A>(commands);
+    warm_up::<B>(commands);
+    (0..runs)
+        .map(|_| (measure::<A>(commands), measure::<B>(commands)))
+        .unzip()
 }
 
 /// The run whose overall p99 is the median of all runs (D27). Taking one whole run,
@@ -324,6 +338,16 @@ mod tests {
         // not the 3rd, so picking "the middle index" without sorting would be caught.
         let median = median_run(&reports);
         assert_eq!(median.all.value_at_quantile(0.99), 300);
+    }
+
+    #[test]
+    fn interleaved_gives_each_book_every_run() {
+        let cmds: Vec<Command> = Generator::new(GenConfig::default()).take(2_000).collect();
+        let (a, b) = measure_interleaved::<RefBook, FastBook>(&cmds, 3);
+        assert_eq!((a.len(), b.len()), (3, 3));
+        for r in a.iter().chain(&b) {
+            assert_eq!(r.all.len(), cmds.len() as u64);
+        }
     }
 
     #[test]
