@@ -9,6 +9,7 @@ pub mod fast;
 pub mod gen;
 pub mod hash;
 pub mod journal;
+pub mod ladder;
 pub mod latency;
 pub mod ledger;
 pub mod reference;

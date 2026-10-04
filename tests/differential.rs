@@ -11,7 +11,7 @@ use common::random_command;
 use lob::gen::{GenConfig, Generator};
 use lob::ledger::Ledger;
 use lob::rng::Rng;
-use lob::{BookConfig, Command, FastBook, OrderBook, RefBook, Side};
+use lob::{BookConfig, Command, FastBook, OrderBook, Price, RefBook, Side};
 
 /// Feed both books the same commands; fail at the first difference.
 fn compare(
@@ -75,6 +75,45 @@ fn edge_cases(seed: u64, n: usize, tick: i64) -> impl Iterator<Item = Command> {
     (0..n).map(move |_| random_command(&mut rng, &mut next_id, tick))
 }
 
+/// Edge-case flow with prices spread over the fast book's ladder window (D33): mostly near
+/// the first price, but also straddling both window edges and far outside it (the overflow
+/// tree). Matching then runs across the window/overflow boundary in both directions.
+fn wide(seed: u64, n: usize, tick: i64) -> impl Iterator<Item = Command> {
+    let half = (lob::ladder::WINDOW / 2) as i64 * tick;
+    let mut rng = Rng::new(seed ^ 0x5a5a_5a5a);
+    edge_cases(seed, n, tick).map(move |cmd| {
+        let shift = match rng.below(10) {
+            0 => half,
+            1 => -half,
+            2 => 3 * half,
+            3 => -3 * half,
+            _ => 0,
+        };
+        let moved = |p: Price| Price(p.0 + shift);
+        match cmd {
+            Command::Limit {
+                id,
+                side,
+                qty,
+                price,
+                tif,
+            } => Command::Limit {
+                id,
+                side,
+                qty,
+                price: moved(price),
+                tif,
+            },
+            Command::Modify { id, qty, price } => Command::Modify {
+                id,
+                qty,
+                price: moved(price),
+            },
+            other => other,
+        }
+    })
+}
+
 fn edge_config(tick: i64) -> BookConfig {
     BookConfig {
         tick_size: tick,
@@ -115,6 +154,34 @@ fn edge_case_flow_matches_reference() {
 }
 
 #[test]
+fn wide_price_flow_matches_reference() {
+    for (tick, seeds) in [(1, 0..10), (5, 50..55)] {
+        for seed in seeds {
+            compare(
+                &format!("wide tick-{tick} seed {seed}"),
+                edge_config(tick),
+                wide(seed, 10_000, tick),
+                1,
+            );
+        }
+    }
+}
+
+/// The wide flow really does reach the overflow tree, so the test above covers it.
+#[test]
+fn wide_price_flow_uses_the_overflow() {
+    let mut book = FastBook::with_config(edge_config(1));
+    let mut events = Vec::new();
+    let mut most = 0;
+    for cmd in wide(0, 10_000, 1) {
+        events.clear();
+        book.apply(&cmd, &mut events);
+        most = most.max(book.overflow_levels());
+    }
+    assert!(most >= 4, "at most {most} overflow levels");
+}
+
+#[test]
 fn deep_queue_matches_reference() {
     compare(
         "deep queue",
@@ -140,6 +207,12 @@ fn long_differential_run() {
             &format!("edge seed {seed}"),
             edge_config(1),
             edge_cases(seed, 500_000, 1),
+            1_000,
+        );
+        compare(
+            &format!("wide seed {seed}"),
+            edge_config(1),
+            wide(seed, 500_000, 1),
             1_000,
         );
     }

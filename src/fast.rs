@@ -6,17 +6,18 @@
 //! - Each price level is an intrusive doubly linked list threaded through the slab
 //!   (`prev`/`next`), with head, tail, total quantity and order count kept on the level.
 //! - An id -> slot map makes cancel and modify O(1) to find and O(1) to unlink.
-//! - The best level on each side is cached; the price tree is only consulted when a
+//! - The best level on each side is cached; the price ladder (D33) is only searched when a
 //!   level is created or the best level empties.
 //!
 //! Correctness is defined by `RefBook`: the differential tests feed both books the same
 //! commands and require identical events.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use crate::book::{BookConfig, Level, OrderBook};
 use crate::command::{Command, Event, RejectReason, TimeInForce};
 use crate::hash::IdBuildHasher;
+use crate::ladder::Ladder;
 use crate::types::{OrderId, Price, Qty, Side};
 
 /// "No index": the end of a list, or no best level.
@@ -98,9 +99,9 @@ pub struct FastBook {
     config: BookConfig,
     orders: Slab<Node>,
     levels: Slab<LevelNode>,
-    /// Price -> level index, per side.
-    bids: BTreeMap<Price, u32>,
-    asks: BTreeMap<Price, u32>,
+    /// Price -> level index, per side: a tick-indexed window plus a tree outside it (D33).
+    bids: Ladder,
+    asks: Ladder,
     /// Cached best level per side (`NIL` when the side is empty). [bids, asks].
     best: [u32; 2],
     /// Resting order id -> slot, with a one-multiply hash instead of SipHash (D31).
@@ -121,27 +122,45 @@ impl FastBook {
         Self::with_config(BookConfig::default())
     }
 
-    fn tree(&self, side: Side) -> &BTreeMap<Price, u32> {
+    fn tree(&self, side: Side) -> &Ladder {
         match side {
             Side::Buy => &self.bids,
             Side::Sell => &self.asks,
         }
     }
 
-    fn tree_mut(&mut self, side: Side) -> &mut BTreeMap<Price, u32> {
+    fn tree_mut(&mut self, side: Side) -> &mut Ladder {
         match side {
             Side::Buy => &mut self.bids,
             Side::Sell => &mut self.asks,
         }
     }
 
-    /// The best level according to the tree (ignoring the cache).
+    /// The best level according to the ladder (ignoring the cache).
     fn tree_best(&self, side: Side) -> u32 {
         let best = match side {
-            Side::Buy => self.bids.last_key_value(),
-            Side::Sell => self.asks.first_key_value(),
+            Side::Buy => self.bids.highest_below(None),
+            Side::Sell => self.asks.lowest_above(None),
         };
-        best.map_or(NIL, |(_, &l)| l)
+        best.map_or(NIL, |(_, l)| l)
+    }
+
+    /// The best level strictly worse than `price`: the new best once the level at `price`
+    /// (the old best) is gone. Searching from there is shorter than from the far end.
+    fn next_best(&self, side: Side, price: Price) -> u32 {
+        let next = match side {
+            Side::Buy => self.bids.highest_below(Some(price)),
+            Side::Sell => self.asks.lowest_above(Some(price)),
+        };
+        next.map_or(NIL, |(_, l)| l)
+    }
+
+    /// Visit `side`'s levels best first until `f` returns false. Allocation-free.
+    fn visit_best_first(&self, side: Side, f: impl FnMut(Price, u32) -> bool) {
+        match side {
+            Side::Buy => self.bids.visit_descending(f),
+            Side::Sell => self.asks.visit_ascending(f),
+        }
     }
 
     fn best_price(&self, side: Side) -> Option<Price> {
@@ -156,21 +175,16 @@ impl FastBook {
 
     /// FOK pre-scan: walks levels, not orders, thanks to `total`.
     fn can_fill(&self, side: Side, qty: Qty, limit: Price) -> bool {
-        let tree = self.tree(side.opposite());
-        let mut available = 0;
-        let mut check = |&l: &u32| {
-            let level = &self.levels[l];
-            if !side.crosses(limit, level.price) {
-                return Some(false);
+        let (mut available, mut enough) = (0, false);
+        self.visit_best_first(side.opposite(), |price, l| {
+            if !side.crosses(limit, price) {
+                return false;
             }
-            available += level.total;
-            (available >= qty.0).then_some(true)
-        };
-        let found = match side {
-            Side::Buy => tree.values().find_map(&mut check),
-            Side::Sell => tree.values().rev().find_map(&mut check),
-        };
-        found == Some(true)
+            available += self.levels[l].total;
+            enough = available >= qty.0;
+            !enough
+        });
+        enough
     }
 
     fn validate(&self, qty: Qty, price: Option<Price>) -> Result<(), RejectReason> {
@@ -236,8 +250,8 @@ impl FastBook {
 
     /// Append an order to the back of its price level, creating the level if needed.
     fn rest(&mut self, id: OrderId, side: Side, price: Price, qty: u64, post_only: bool) {
-        let level = match self.tree(side).get(&price) {
-            Some(&l) => l,
+        let level = match self.tree(side).get(price) {
+            Some(l) => l,
             None => self.new_level(side, price),
         };
         let tail = self.levels[level].tail;
@@ -271,7 +285,7 @@ impl FastBook {
             count: 0,
         });
         self.tree_mut(side).insert(price, level);
-        // A new level becomes the best if it beats the current best. (Prices in the tree
+        // A new level becomes the best if it beats the current best. (Prices in the ladder
         // are unique, so it's never equal.)
         let best = self.best[side_ix(side)];
         let better = best == NIL
@@ -287,10 +301,10 @@ impl FastBook {
 
     fn remove_level(&mut self, level: u32) {
         let LevelNode { price, side, .. } = self.levels[level];
-        self.tree_mut(side).remove(&price);
+        self.tree_mut(side).remove(price);
         self.levels.remove(level);
         if self.best[side_ix(side)] == level {
-            self.best[side_ix(side)] = self.tree_best(side);
+            self.best[side_ix(side)] = self.next_best(side, price);
         }
     }
 
@@ -410,6 +424,14 @@ impl FastBook {
     }
 }
 
+impl FastBook {
+    /// Levels outside the ladder windows (D33), both sides. Those take the slower,
+    /// allocating tree path, so benchmarks and tests report it.
+    pub fn overflow_levels(&self) -> usize {
+        self.bids.overflow_len() + self.asks.overflow_len()
+    }
+}
+
 impl Default for FastBook {
     fn default() -> Self {
         Self::new()
@@ -423,8 +445,8 @@ impl OrderBook for FastBook {
             config,
             orders: Slab::new(),
             levels: Slab::new(),
-            bids: BTreeMap::new(),
-            asks: BTreeMap::new(),
+            bids: Ladder::new(config.tick_size),
+            asks: Ladder::new(config.tick_size),
             best: [NIL, NIL],
             index: HashMap::default(),
             last_id: None,
@@ -449,18 +471,20 @@ impl OrderBook for FastBook {
     }
 
     fn depth(&self, side: Side, n: usize) -> Vec<Level> {
-        let level = |&l: &u32| {
+        let mut out = Vec::new();
+        if n == 0 {
+            return out;
+        }
+        self.visit_best_first(side, |_, l| {
             let lv = &self.levels[l];
-            Level {
+            out.push(Level {
                 price: lv.price,
                 qty: Qty(lv.total),
                 orders: lv.count as usize,
-            }
-        };
-        match side {
-            Side::Buy => self.bids.values().rev().take(n).map(level).collect(),
-            Side::Sell => self.asks.values().take(n).map(level).collect(),
-        }
+            });
+            out.len() < n
+        });
+        out
     }
 
     fn check_invariants(&self) -> Result<(), String> {
@@ -474,7 +498,13 @@ impl OrderBook for FastBook {
             if self.best[side_ix(side)] != self.tree_best(side) {
                 return Err(format!("stale best-level cache on the {side} side"));
             }
-            for (&price, &l) in self.tree(side) {
+            self.tree(side).check()?;
+            let mut levels = Vec::new();
+            self.visit_best_first(side, |price, l| {
+                levels.push((price, l));
+                true
+            });
+            for (price, l) in levels {
                 let lv = &self.levels[l];
                 if lv.price != price || lv.side != side {
                     return Err(format!("level {l} filed under {side} {price} is {lv:?}"));
@@ -525,7 +555,7 @@ impl OrderBook for FastBook {
             ));
         }
         if self.levels.live() != self.bids.len() + self.asks.len() {
-            return Err("level slab and price trees disagree".to_string());
+            return Err("level slab and price ladders disagree".to_string());
         }
         Ok(())
     }
