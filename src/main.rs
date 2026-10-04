@@ -1,18 +1,21 @@
-//! Interactive REPL. In M0 it only parses commands; M1 wires in the reference book.
+//! Interactive REPL over the reference book. It takes the same lines as scenario files.
 
 use std::io::{self, BufRead, Write};
 
-use lob::Command;
+use lob::scenario::run_line;
+use lob::RefBook;
 
 const HELP: &str = "\
 commands:
   limit  <id> <buy|sell> <qty> <price>   prices are integer ticks
   market <id> <buy|sell> <qty>
   cancel <id>
+  book                                   asks above bids, highest price first
   help | quit";
 
 fn main() -> io::Result<()> {
-    println!("lob (M0 scaffold: commands are parsed but not matched yet). Type `help`.");
+    println!("lob reference book. Type `help`.");
+    let mut book = RefBook::new();
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     loop {
@@ -23,13 +26,16 @@ fn main() -> io::Result<()> {
             return Ok(());
         }
         match line.trim() {
-            "" => continue,
             "help" => println!("{HELP}"),
             "quit" | "exit" => return Ok(()),
-            input => match input.parse::<Command>() {
-                Ok(cmd) => println!("parsed: {cmd}"),
-                Err(e) => println!("error: {e}"),
-            },
+            input => {
+                let mut out = String::new();
+                match run_line(&mut book, input, &mut out) {
+                    // Output lines start with "> " for scenario files; drop it here.
+                    Ok(()) => out.lines().for_each(|l| println!("{}", &l[2..])),
+                    Err(e) => println!("error: {e}"),
+                }
+            }
         }
     }
 }

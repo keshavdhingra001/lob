@@ -1,0 +1,16 @@
+# Prices are signed ticks: spreads between two contracts can trade below zero.
+limit 1 sell 5 -20
+> accepted 1
+limit 2 buy 5 -50
+> accepted 2
+book
+> ask -20 5 (1)
+> bid -50 5 (1)
+
+# -10 is above -20, so this buy crosses the ask.
+limit 3 buy 8 -10
+> accepted 3
+> trade 3 1 buy 5 -20
+book
+> bid -10 3 (1)
+> bid -50 5 (1)

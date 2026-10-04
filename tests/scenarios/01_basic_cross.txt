@@ -1,0 +1,15 @@
+# A resting sell, then a buy that crosses it.
+limit 1 sell 100 10100
+> accepted 1
+limit 2 buy 30 10100
+> accepted 2
+> trade 2 1 buy 30 10100
+book
+> ask 10100 70 (1)
+
+# A buy below the best ask doesn't trade: it rests, and the spread is 10050 to 10100.
+limit 3 buy 50 10050
+> accepted 3
+book
+> ask 10100 70 (1)
+> bid 10050 50 (1)

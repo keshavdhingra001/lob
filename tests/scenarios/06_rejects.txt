@@ -1,0 +1,28 @@
+# Zero quantity is rejected and changes nothing.
+limit 1 buy 0 10000
+> rejected 1 zero-qty
+market 2 sell 0
+> rejected 2 zero-qty
+book
+> empty
+
+# A rejected order doesn't use up its id.
+limit 1 buy 10 10000
+> accepted 1
+
+# Reusing an id is rejected while the order rests...
+limit 1 sell 5 10100
+> rejected 1 duplicate-id
+# ...after it's cancelled...
+cancel 1
+> cancelled 1 10
+limit 1 buy 10 10000
+> rejected 1 duplicate-id
+# ...and after a market order is done.
+market 2 buy 5
+> accepted 2
+> cancelled 2 5
+market 2 buy 5
+> rejected 2 duplicate-id
+book
+> empty

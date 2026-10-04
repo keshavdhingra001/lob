@@ -1,0 +1,31 @@
+# Better prices fill first, and every fill trades at the maker's price.
+limit 1 sell 10 10300
+> accepted 1
+limit 2 sell 10 10100
+> accepted 2
+limit 3 sell 10 10200
+> accepted 3
+
+# Buying up to 10250 sweeps 10100, then 10200, and stops before 10300.
+# The taker pays 10100 and 10200, not its limit (price improvement), and rests the rest.
+limit 4 buy 25 10250
+> accepted 4
+> trade 4 2 buy 10 10100
+> trade 4 3 buy 10 10200
+book
+> ask 10300 10 (1)
+> bid 10250 5 (1)
+
+# The mirror image: a sell sweeps the highest bids first.
+limit 5 buy 10 10000
+> accepted 5
+limit 6 buy 10 9900
+> accepted 6
+limit 7 sell 20 9950
+> accepted 7
+> trade 7 4 sell 5 10250
+> trade 7 5 sell 10 10000
+book
+> ask 10300 10 (1)
+> ask 9950 5 (1)
+> bid 9900 10 (1)

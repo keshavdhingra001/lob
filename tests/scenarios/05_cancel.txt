@@ -1,0 +1,42 @@
+limit 1 buy 10 10000
+> accepted 1
+limit 2 buy 20 10000
+> accepted 2
+limit 3 buy 30 10000
+> accepted 3
+limit 4 sell 5 10100
+> accepted 4
+
+# Cancel from the middle of a queue; the orders around it keep their order.
+cancel 2
+> cancelled 2 20
+# Cancelling the only order at a price removes the level.
+cancel 4
+> cancelled 4 5
+book
+> bid 10000 40 (2)
+market 5 sell 15
+> accepted 5
+> trade 5 1 sell 10 10000
+> trade 5 3 sell 5 10000
+
+# Cancelling twice, or an id that never existed, is rejected.
+cancel 2
+> rejected 2 unknown-order
+cancel 99
+> rejected 99 unknown-order
+
+# A partly filled order cancels with only what's left.
+cancel 3
+> cancelled 3 25
+
+# A fully filled order can't be cancelled.
+limit 6 sell 3 10100
+> accepted 6
+market 7 buy 3
+> accepted 7
+> trade 7 6 buy 3 10100
+cancel 6
+> rejected 6 unknown-order
+book
+> empty

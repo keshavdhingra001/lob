@@ -1,0 +1,31 @@
+# At one price, the oldest order fills first (FIFO).
+limit 1 buy 10 10000
+> accepted 1
+limit 2 buy 10 10000
+> accepted 2
+limit 3 buy 10 10000
+> accepted 3
+market 4 sell 15
+> accepted 4
+> trade 4 1 sell 10 10000
+> trade 4 2 sell 5 10000
+book
+> bid 10000 15 (2)
+
+# A partial fill keeps its place: order 2 is still ahead of order 3.
+market 5 sell 6
+> accepted 5
+> trade 5 2 sell 5 10000
+> trade 5 3 sell 1 10000
+book
+> bid 10000 9 (1)
+
+# A new order at the same price queues behind the ones already there.
+limit 6 buy 4 10000
+> accepted 6
+market 7 sell 10
+> accepted 7
+> trade 7 3 sell 9 10000
+> trade 7 6 sell 1 10000
+book
+> bid 10000 3 (1)

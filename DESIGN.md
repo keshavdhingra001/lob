@@ -11,7 +11,8 @@ clients ──> gateway thread ──SPSC ring──> matching thread ──SPSC
                                            pure, deterministic             command journal (replay)
 ```
 
-Today (M0): types, the `Command`/`Event` model, the text format and the `OrderBook` trait.
+Today (M1): the reference book (D8) behind the `OrderBook` trait, matching by D9, checked by
+scenario scripts and an invariant checker (D10).
 
 ## Decisions
 
@@ -65,3 +66,50 @@ Today (M0): types, the `Command`/`Event` model, the text format and the `OrderBo
 - **Why:** matching is inherently sequential (price-time priority is a total order), so locking
   only adds contention and makes results depend on thread timing, which breaks D4. Scaling
   comes from sharding symbols across threads. This is the LMAX Disruptor design.
+
+### D8: The reference book (M1)
+- **What:** per side, a `BTreeMap<Price, VecDeque<Order>>`: sorted price levels, each a FIFO queue.
+  A `HashMap<OrderId, (Side, Price)>` finds a resting order's level for cancel, which then scans
+  that level's queue.
+- **Costs:** a new order that rests is O(log P) for P price levels; each fill is O(1) plus
+  O(log P) when a level empties; cancel is O(log P + orders at that level).
+- **Why:** it's the oracle. Every later book is checked against it, so it has to be obviously
+  correct, not fast. M4's fast book must produce identical events.
+- **Rejected alternatives:**
+  - Storing each order's index in its queue: an index shifts whenever an order ahead of it leaves.
+  - A sorted `Vec` of levels: O(P) inserts. A tick-indexed array is what M6 measures.
+
+### D9: Matching rules (M1)
+- **Price-time priority:** best price first. Within a price, the oldest order goes first, and a
+  partial fill keeps its place in the queue.
+- **Trade price:** always the resting (maker) order's price. A buy limit at 10250 that hits an ask
+  at 10100 pays 10100. That's price improvement for the taker.
+- **One `trade` per maker order filled**, rather than one per price level, so every resting
+  order's fills can be traced (this matters for M8's market data and for differential tests).
+- **Market orders** fill what the book has, then `cancelled <id> <rest>`. They never rest.
+  Rejecting a market order that can't fully fill needs a pre-scan, and that's what FOK (M2) is for.
+- **Event order per command:** `accepted`, then trades in fill order, then `cancelled` if a
+  remainder was dropped. A limit order that rests produces no extra event; resting is implied.
+- **Rejects change nothing:** zero quantity, a reused id, or a cancel of an id that isn't resting.
+  A rejected order doesn't use up its id.
+- **Id uniqueness:** any id accepted this session can never be used again, even after the order
+  is done. Otherwise a late cancel meant for the old order could hit the new one. The `used` set
+  grows with the session. M6 will measure it (an alternative is to require increasing ids, which
+  costs O(1) memory).
+- **Not yet:** modify, IOC/FOK/post-only, tick size (M2); self-trade prevention (Tier 3).
+
+### D10: Scenario tests (M1)
+- **What:** `tests/scenarios/*.txt` are scripts in the D6 format. Each command is followed by its
+  expected events as `> ` lines, and `book` prints the whole book as a ladder.
+  The runner drops the `>` lines, re-runs the script and regenerates them, so a scenario passes
+  when it equals its own transcript. On failure it shows the first line that differs.
+- **The invariant checker runs after every command:** never crossed, no empty levels, no zero
+  quantities, and the index agrees with the queues.
+- **Same runner for every book:** M4 runs the same files against the fast book. The REPL uses it
+  too, so anything typed there can be pasted into a scenario.
+- **Mutation-checked:** 8 planted bugs, all caught:
+  - the worst ask first, or LIFO within a level
+  - trading at the taker's limit, or the crosses check inverted
+  - the market remainder not cancelled
+  - filled orders left in the index, or duplicate ids accepted
+  - empty levels not removed (this one made matching loop forever, so it was caught by the timeout)

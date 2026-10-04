@@ -1,0 +1,26 @@
+# A market order into an empty book: accepted, then its whole quantity is cancelled.
+market 1 buy 10
+> accepted 1
+> cancelled 1 10
+
+# A market order takes any price and cancels what the book can't fill. It never rests.
+limit 2 sell 5 10100
+> accepted 2
+limit 3 sell 5 10200
+> accepted 3
+market 4 buy 12
+> accepted 4
+> trade 4 2 buy 5 10100
+> trade 4 3 buy 5 10200
+> cancelled 4 2
+book
+> empty
+
+# Filled exactly: no cancel event.
+limit 5 buy 7 9900
+> accepted 5
+market 6 sell 7
+> accepted 6
+> trade 6 5 sell 7 9900
+book
+> empty

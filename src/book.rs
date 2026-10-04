@@ -24,6 +24,11 @@ pub trait OrderBook {
     /// Up to `n` levels on `side`, best price first (highest bid, lowest ask).
     fn depth(&self, side: Side, n: usize) -> Vec<Level>;
 
+    /// Check the book's internal consistency: never crossed, no empty levels, no
+    /// zero-quantity orders, and lookup structures agree with the queues. Tests call it
+    /// after every command. It's O(book size), so it never runs on the hot path.
+    fn check_invariants(&self) -> Result<(), String>;
+
     fn best_bid(&self) -> Option<Level> {
         self.depth(Side::Buy, 1).first().copied()
     }

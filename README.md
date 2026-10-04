@@ -14,19 +14,30 @@ cargo run
 ```
 
 ```
-> limit 1 buy 100 10025
-parsed: limit 1 buy 100 10025
-> market 2 sell 40
-parsed: market 2 sell 40
+> limit 1 sell 100 10100
+accepted 1
+> limit 2 buy 30 10100
+accepted 2
+trade 2 1 buy 30 10100
+> limit 3 buy 50 10050
+accepted 3
+> book
+ask 10100 70 (1)
+bid 10050 50 (1)
 ```
 
-Prices are integer ticks (`10025` is $100.25 with a one-cent tick). Matching arrives in M1.
+Prices are integer ticks (`10025` is $100.25 with a one-cent tick). A trade line reads
+`trade <taker> <maker> <taker side> <qty> <price>`.
 
 ## What's built so far
 
-- **Command and event model**: limit, market and cancel in; accepted, rejected, trade and cancelled out.
-- **Text format** with a parser and printer that round-trip, used by the REPL and scenario tests.
-- **`OrderBook` trait** that the reference book (M1) and the fast book (M4) both implement.
+- **Reference book**: price-time priority matching for limit, market and cancel. Every trade
+  happens at the resting order's price. It's built to be obviously correct, and it's the oracle
+  the fast book (M4) is tested against.
+- **Scenario tests**: scripts of commands and their expected events
+  ([tests/scenarios](tests/scenarios)), checked against every book. An invariant checker runs
+  after every command, and the tests are mutation-checked.
+- **Command and event model** with a text format whose parser and printer round-trip.
 
 ## Planned headline results
 
