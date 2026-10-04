@@ -11,12 +11,13 @@ clients ──> gateway thread ──SPSC ring──> matching thread ──SPSC
                                            pure, deterministic             command journal (replay)
 ```
 
-Today (M4, Tier 1 complete): two books behind the `OrderBook` trait: the reference book (D8) behind the `OrderBook` trait, matching by D9 with modify
+Today (M5): two books behind the `OrderBook` trait: the reference book (D8), matching by D9 with modify
 (D11), IOC/FOK/post-only (D12) and instrument rules (D14). Checked by scenario scripts, an
 invariant checker (D10) and an event-only conservation ledger over random sessions (D13).
 Input is recorded in a binary journal (D15, D16); replay produces a sequenced event stream and a
 digest (D17). A seeded generator (D18) supplies realistic order flow. The fast book (D19–D21)
-produces identical events, proven by differential testing over 15M commands (D22).
+produces identical events, proven by differential testing over 15M commands (D22). A latency
+harness outside the engine (D23–D27) and criterion benches (D28) measure both books per command kind.
 
 ## Decisions
 
@@ -384,3 +385,74 @@ produces identical events, proven by differential testing over 15M commands (D22
 - **Why chunks:** timing each op alone would add the about 15 ns clock floor to an op of about 30 ns.
 - **Caveat:** "add" also inserts a fresh id into the ever-growing used-id set, so it includes that
   set's amortized growth. That's honest, because the real engine pays it too, but it's an M6 target.
+
+### M5 results (release, `taskset -c 2`, interleaved, median of 5 runs, every floor 13–15 ns)
+Machine: i7-1165G7 laptop, kernel 7.2.5, `powersave` governor (`balance_performance`), turbo on.
+All values in ns and include the about 14 ns clock floor. Raw output: `scripts/latency.sh`.
+
+**Generated flow, 2M commands (about 1,700 resting):**
+
+| Kind | Count | Ref p50 | Ref p99 | Ref p99.9 | Fast p50 | Fast p99 | Fast p99.9 |
+|---|---|---|---|---|---|---|---|
+| limit-rest | 564,749 | 91 | 262 | 731 | 90 | 224 | 765 |
+| limit-cross | 303,074 | 64 | 380 | 723 | 61 | 469 | 851 |
+| limit-kill | 42,726 | 64 | 184 | 693 | 56 | 175 | 695 |
+| market | 66,841 | 60 | 237 | 714 | 55 | 263 | 700 |
+| cancel | 231,221 | 106 | 179 | 343 | **49** | **106** | **214** |
+| modify | 46,291 | 127 | 342 | 707 | **62** | **188** | **434** |
+| reject | 745,098 | 33 | 68 | 149 | 31 | 68 | 163 |
+| all | 2,000,000 | 71 | 261 | 630 | 52 | 259 | 685 |
+| max | | | | 8.4 ms | | | 8.5 ms |
+
+A second clean run agreed (fast vs ref cancel p99 112 vs 202, cross p99 505 vs 470).
+
+**Deeper book (max-live 200k, about 17,000 resting), cancel and modify are where the structure shows:**
+
+| Kind | Ref p50 | Ref p99 | Ref p99.9 | Fast p50 | Fast p99 | Fast p99.9 |
+|---|---|---|---|---|---|---|
+| limit-rest | 99 | 392 | 970 | 100 | 290 | 774 |
+| limit-cross | 66 | 580 | 1,230 | 63 | 691 | 1,605 |
+| cancel | 164 | 687 | 1,544 | 69 | 328 | 860 |
+| modify | 219 | 728 | 1,739 | 97 | 398 | 915 |
+| all | 62 | 413 | 941 | 58 | 404 | 1,001 |
+
+**One 10,000-order queue, cancelled in random order:** cancel p50 / p99 / p99.9 = 1,086 / 3,557 / 4,987 for the reference book
+vs 44 / 61 / 144 for the fast book (58x at p99).
+
+**Criterion** (`benches/book.rs`, mean ns per op, min–max over 3 runs, see the caveat):
+
+| Op @ depth | Reference | Fast |
+|---|---|---|
+| add @ 10 | 82–102 | 94–97 |
+| add @ 100k | 141–231 | 114–126 |
+| cancel @ 10 | 55–119 | 41–54 |
+| cancel @ 1k | 72–87 | 27–61 |
+| cancel @ 100k | **487–703** | **67–136** |
+| match @ 10 | 90–173 | 87–99 |
+| match @ 100k | 90–247 | 85–97 |
+
+- **Caveat:** another project's benchmark ran during parts of two of the three criterion runs, so the ranges
+  are wide. Criterion can't interleave the books the way `lob latency` does. Only the claims that held in
+  every run are made below.
+
+**What the numbers say:**
+1. **Cancel and modify are the fast book's wins, and they grow with queue depth:** cancel 2.2x at p50 and 1.7x at p99 on
+   realistic flow, 2x at p99 on the deeper book, and 58x at p99 on one deep queue. Criterion agrees: at 100k orders the
+   fast book is 4–9x faster in every run. That's D22's O(level) vs O(1), now visible in the tail.
+2. **Rest, cross and market cost the same in both books** at p50 (within about 5 ns). Both pay
+   the same shared costs: SipHash lookups, the `BTreeMap` price tree, pushing events.
+3. **The fast book's crossing limits have a slightly worse tail** (p99 469 vs 380 on generated flow, 691 vs 580
+   on the deeper book; p99.9 851 vs 723 and 1,605 vs 1,230). This is consistent across every interleaved run, so it isn't noise. The cause isn't known yet; M6 profiling
+   (perf) should find it. Cache misses in the slab while sweeping are a hypothesis, not a finding.
+4. **The max (2–15 ms) is the same in both books, and it's the used-id set rehashing.** Commands over 50 µs
+   occur at order ids of about 3.6k, 7.3k, 14.6k ... 941k, each double the last. Those are the points where hashbrown's table fills to 7/8 and
+   grows. The set of every id ever used never shrinks, so each resize rehashes all of it inside
+   one command: 20 ms at 941k ids. **This is M6's first target**, for example with dense ids or a
+   preallocated or bounded structure. A real exchange can't pause one order for 20 ms.
+5. **About 37% of commands are rejects at about 35 ns**, which is why the overall p50 (58–78 ns) is lower
+   than the p50 of any real operation. Per-kind histograms (D26) keep that from hiding anything.
+
+### D29: Profiling with `perf` (pending)
+- **Planned:** `perf stat -e instructions,cycles,cache-misses,branch-misses` per workload and a
+  flamegraph of the fast book. This needs `perf`, which isn't installed (`sudo pacman -S perf`). It sets M6's targets and
+  should explain result 3 above.
