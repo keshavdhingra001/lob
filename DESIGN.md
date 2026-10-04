@@ -42,7 +42,7 @@ harness outside the engine (D23–D27) and criterion benches (D28) measure both 
 - **Alternatives:** the engine assigns ids and returns them in `Accepted`.
 - **Why:** the command stream alone fully determines the run, so a journal of commands replays
   exactly (M3) without needing the engine's output. Exchanges work the same way (FIX `ClOrdID`).
-  Uniqueness rules are an M1 decision.
+  Uniqueness rules: D9, replaced in M6 by "ids must increase" (D30).
 
 ### D4: Deterministic state machine
 - **What:** `apply(&Command) -> Events` with no clock, no randomness, no I/O and no dependence on
@@ -99,8 +99,8 @@ harness outside the engine (D23–D27) and criterion benches (D28) measure both 
   A rejected order doesn't use up its id.
 - **Id uniqueness:** any id accepted this session can never be used again, even after the order
   is done. Otherwise a late cancel meant for the old order could hit the new one. The `used` set
-  grows with the session. M6 will measure it (an alternative is to require increasing ids, which
-  costs O(1) memory).
+  grows with the session. **Superseded in M6 by D30** (ids must increase), after M5 measured the
+  set at 37% of the fast book's time and as the cause of its multi-ms worst case.
 - **Not yet:** modify, IOC/FOK/post-only, tick size (M2); self-trade prevention (Tier 3).
 
 ### D10: Scenario tests (M1)
@@ -508,3 +508,75 @@ vs 44 / 61 / 144 for the fast book (58x at p99).
   M6 can tell them apart with `perf annotate` on `take`/`unlink`, or by filling orders without unlinking them one at a time.
 - **Not done:** an SVG flamegraph (it needs `inferno` or the FlameGraph scripts, which aren't installed). `perf report`'s
   text output answered the questions above.
+
+### D30: Order ids must increase within a session (M6)
+- **What:** a new order's id must be greater than the highest id accepted so far this session,
+  or it's rejected `id-not-increasing` (this replaces `duplicate-id`, and keeps its event code 4). Both books store
+  one `last_id` instead of a set of every id ever used. Gaps are fine. A rejected order
+  doesn't raise the bar, so "rejects change nothing" (D9) still holds.
+- **Why:** M5/D29 measured the used-id set at 37% of the fast book's samples, and its doubling
+  rehash as the 8–20 ms worst case in both books. An increasing id needs O(1) memory and
+  one compare, and it still rules out reuse, the case that matters (a late cancel hitting a new order).
+- **Real venues:** Nasdaq's OUCH requires each order's `UserRefNum` to be greater than the last one on the session;
+  FIX only requires `ClOrdID` to be unique. Clients generate ids from a counter anyway.
+- **Cost:** a client that sends ids out of order now gets rejected. A gateway that accepts
+  arbitrary client ids could map them to increasing internal ids. That's a gateway job (Tier 3), not the book's.
+- **Checked:**
+  - The golden digest didn't change, because generated ids always increased.
+  - `06_rejects.txt` now also covers a gap being accepted, a lower never-used id being rejected, and a rejected id not raising the bar.
+  - 6 planted bugs, 3 per book, all caught: `<` instead of `<=`, the bar never raised after the first id, and only even ids checked.
+
+### D31: fmix64 hasher for the fast book's id index
+- **What:** `src/hash.rs`: `IdHasher` runs MurmurHash3's 64-bit finalizer ("fmix64": three xor-shifts and
+  two multiplies) on the `u64` id, replacing SipHash-1-3. Only the fast book uses it; the
+  reference book stays obviously correct and slow on purpose.
+- **Why:** after D30 the id index is the largest hashing cost left (17% in D29). SipHash protects against
+  attackers choosing colliding keys, which costs a lot for an 8-byte key.
+- **First attempt, rejected by its own test:** a single 128-bit "folded" multiply (the high and low
+  halves XORed) left ids that differ only in high bits clustered. `i << 40` for 4,096 ids hit 1,755 of 4,096
+  buckets, against about 2,590 for a random hash. fmix64 gets about 2,590 on every pattern tested.
+- **Tests:** bucket spread and 7-bit tag spread for sequential, strided and high-bit patterns, plus
+  an avalanche test (every input bit flips each bucket and tag bit 40–60% of the time).
+  5 planted bugs, all caught. One survived at first: dropping the last xor-shift. An odd multiply
+  only reorders the low bits, so bucket counts can't see it; only the avalanche test does (98% vs 56% worst flip rate).
+- **Trade-off:** the constants are fixed, so an attacker who can choose ids could aim for collisions.
+  The output never depends on the hash (the index is never iterated, D21), so a random seed
+  would cost nothing in determinism. Fixed constants keep the table layout, and so
+  the performance, reproducible across runs. Behind an authenticated gateway with increasing ids
+  (D30) the risk is small; a per-process seed is a one-line change if it isn't.
+
+### D33: Tick-indexed price ladder (fast book)
+- **What:** `src/ladder.rs`, one `Ladder` per side:
+  - **The window:** 65,536 tick slots centred on the first price that side sees, each holding a level index or `EMPTY`.
+  - **A two-level occupancy bitmap:** 1,024 words plus a 16-word summary, so finding the next non-empty level takes a few word operations however sparse the side is.
+  - **An overflow `BTreeMap`** for prices outside the window.
+  - **Walks without allocation:** every ordered walk (depth, the FOK pre-scan, the invariant checks) is a visitor callback, so nothing on the hot path allocates.
+- **Why:**
+  - Inserting a new price level into a `BTreeMap` allocates a node, and removing one frees it. That makes "zero allocations per
+    command" (D32) impossible while levels are created and emptied all the time, which they are (D18's random-walk mid).
+  - A slot lookup is one array index instead of a tree search.
+- **Sizing:** 256 KiB of slots plus 8 KiB of bitmap per side, allocated on that side's first order. Only the slots
+  near the touch are ever in cache. ±32,768 ticks covers far more than a day's range for a normal
+  instrument (a $100 stock with a 1-cent tick moving 5% is 500 ticks).
+- **Not done:** the window never moves. A market that drifts outside it falls back to the tree,
+  which is correct but allocates, like M4. The options are re-centring, or a price collar that rejects orders far from a
+  reference price, as real venues do (limit up / limit down).
+- **Tests:**
+  - A randomized test against a `BTreeMap` model, including both window edges, far overflow above and below, tick 5, and negative prices.
+  - A new differential flow ("wide") puts 40% of prices at the window edges or far outside, so
+    matching crosses between window and tree in both directions. A test confirms it really reaches the overflow.
+- **A mutation that ate the machine:** shifting every price by one tick (in `price_at`) made "next level below p" return p
+  itself, so `depth` and the invariant checker's walks looped forever, growing a `Vec`. It reached 12 GB, and
+  systemd-oomd killed the whole desktop app twice, along with every session running in it.
+  - **Fix:** both walks `debug_assert` that each step moves strictly away, so that bug now panics at once.
+  - **Mutation runs:** each test run now has a 4 GB `MemoryMax` cap (`systemd-run --user --scope`).
+- **Invariant cost:** `Ladder::check` is O(levels + 1,024): the summary against every word, plus every set bit against its slot.
+  The full 65,536-slot scan (`check_full`) runs only in the ladder's own tests. Running it after every command made the
+  differential suite 142 s instead of 3 s. A stale slot with a clear bit escapes the cheap check, but
+  `get` reads slots directly, so it would change events and fail the differential test.
+- **Mutation-checked:** 9 planted bugs in the ladder, all caught: bitmap masks, the summary not cleared, a skipped summary word, word-search off by one, price mapping, bit not cleared on remove,
+  `len`, and the window-vs-tree choice in both directions.
+  In the fast book's use of the ladder: 3 planted bugs (the FOK limit check dropped, `depth(n)` returning n+1 levels, the next best
+  searched on the wrong side), all caught after a fix. The `depth(n)` bug survived at first because every test asked for
+  unlimited depth; the differential test now compares `depth(side, 0)` and `depth(side, 3)` too. A fourth planted change
+  (`return true` past the FOK limit) behaved exactly like the original code, since every later level is past the limit as well, so it was replaced.

@@ -30,10 +30,10 @@ struct Slab<T> {
 }
 
 impl<T> Slab<T> {
-    fn new() -> Self {
+    fn with_capacity(n: usize) -> Self {
         Slab {
-            items: Vec::new(),
-            free: Vec::new(),
+            items: Vec::with_capacity(n),
+            free: Vec::with_capacity(n),
         }
     }
 
@@ -425,6 +425,24 @@ impl FastBook {
 }
 
 impl FastBook {
+    /// A book with room for `orders` resting orders reserved up front: the order and level
+    /// slabs, their free lists and the id index (D32). Below that, applying a command never
+    /// allocates once both sides' ladder windows exist (their first order allocates them).
+    /// Exchanges size their pools at startup for the same reason.
+    pub fn with_capacity(config: BookConfig, orders: usize) -> Self {
+        config.validate();
+        FastBook {
+            config,
+            orders: Slab::with_capacity(orders),
+            levels: Slab::with_capacity(orders),
+            bids: Ladder::new(config.tick_size),
+            asks: Ladder::new(config.tick_size),
+            best: [NIL, NIL],
+            index: HashMap::with_capacity_and_hasher(orders, Default::default()),
+            last_id: None,
+        }
+    }
+
     /// Levels outside the ladder windows (D33), both sides. Those take the slower,
     /// allocating tree path, so benchmarks and tests report it.
     pub fn overflow_levels(&self) -> usize {
@@ -440,17 +458,7 @@ impl Default for FastBook {
 
 impl OrderBook for FastBook {
     fn with_config(config: BookConfig) -> Self {
-        config.validate();
-        FastBook {
-            config,
-            orders: Slab::new(),
-            levels: Slab::new(),
-            bids: Ladder::new(config.tick_size),
-            asks: Ladder::new(config.tick_size),
-            best: [NIL, NIL],
-            index: HashMap::default(),
-            last_id: None,
-        }
+        FastBook::with_capacity(config, 0)
     }
 
     fn apply(&mut self, cmd: &Command, out: &mut Vec<Event>) {
