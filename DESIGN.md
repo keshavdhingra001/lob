@@ -321,3 +321,60 @@ produces identical events, proven by differential testing over 15M commands (D22
     the reference book degrades quadratically. Tail latency (M5) is where that shows on real flow.
   - The next speedups are the shared costs: a cheaper hasher or dense ids, a tick-indexed ladder
     instead of the tree, and no allocation (M6). The numbers above are the baseline that work is measured against.
+
+### D23: Timing lives in a harness, never in the engine (M5)
+- **What:** `src/latency.rs` and `lob latency <journal> [runs]` read a clock around each `apply`
+  call. The books never read a clock (D4), so replay and the golden digest are unaffected.
+- **Alternatives:** timestamps inside the books (breaks D4: output would depend on the clock).
+- **Why:** real engines put timestamps on events at the gateway or sequencer, outside the matching
+  logic, for the same reason.
+
+### D24: HdrHistogram, 3 significant digits, nanoseconds
+- **What:** one `hdrhistogram` histogram per command kind, one for all commands, and one for the
+  clock floor. The range is 0 ns to 10 s, and every value is kept to within 0.1%.
+- **Alternatives:** keep every sample and sort it (2M × 8 bytes per run, fine here but not in a live
+  engine), or hand-written log buckets.
+- **Why:** constant memory, O(1) recording, and exact enough to read p99.9 and max. It's the
+  standard tool in trading and in latency benchmarks such as wrk2.
+
+### D25: `Instant::now()` around each `apply`, and its cost reported
+- **What:** only `apply` sits between the two clock reads. Clearing the buffer, classifying and
+  recording all happen outside the timed window. The same number of empty windows are timed
+  in the same run and printed as "clock floor".
+- **Measured floor:** 14–15 ns p50 on this machine when idle. That floor is included in every sample, so a
+  50 ns p50 is really about 35 ns of work.
+- **Alternatives:** `rdtsc`, which this CPU supports (`constant_tsc`, `nonstop_tsc`). It's cheaper,
+  but needs calibrating to nanoseconds and a fence to stop out-of-order execution moving it.
+  Linux's vDSO `clock_gettime` already reads the TSC with that ordering.
+
+### D26: A command's kind is what it did, not just what it was
+- **What:** seven histograms: limit-rest, limit-cross, limit-kill (an IOC/FOK that traded nothing),
+  market, cancel, modify and reject. `Kind::of` decides from the events after `apply`. A
+  single `rejected` event means reject. Otherwise a limit with a trade is a cross, a limit with
+  a cancel is a kill, and anything else rests.
+- **Why:** one overall number hides the tail. About 37% of generated commands are cheap rejects,
+  which pull the overall p50 down. A limit that sweeps several levels and one that rests run
+  different code. A modify that then trades is still a modify, because that's what the client sent.
+
+### D27: Method: warm-up, pinned core, median of 5 runs, machine printed
+- **What:** `scripts/latency.sh [cpu] [runs]` builds release, generates three seeded journals and
+  runs `taskset -c <cpu> lob latency`. Each book gets one untimed warm-up pass, then N runs on
+  fresh books. The run printed is the one with the median overall p99; the other runs' p99s are
+  printed too, so the spread is visible. The output starts with the CPU, kernel, governor,
+  turbo setting and the CPUs the process may run on.
+- **Why the median run, not the median of each column:** every number in a table then comes from one real run.
+- **What isn't controlled:** the governor (`powersave` with the `balance_performance` hint; changing it needs root), turbo, and the
+  SMT sibling (cpu 6 shares cpu 2's core).
+- **Lesson learned while building it:** another project's `cargo build` running on the same laptop made every
+  percentile 2–3x worse and the tails 5–10x worse. Results are only taken when the load average is low, and
+  the run-to-run p99 spread printed with each table is how to tell a quiet run from a noisy one.
+
+### D28: Criterion microbenchmarks at fixed depths
+- **What:** `benches/book.rs` has add, cancel and match for both books at 10, 1,000 and 100,000 resting
+  orders, spread over 50 levels per side. Ops are timed in chunks of up to 100 and then undone untimed (adds
+  cancelled, cancels and fills replaced), so the depth stays within `depth + 100`. After each
+  chunk an untimed assert checks the last op rested, cancelled or traded as claimed. Two
+  planted fixture bugs, a non-crossing taker and cancelling an id twice, both trip it.
+- **Why chunks:** timing each op alone would add the about 15 ns clock floor to an op of about 30 ns.
+- **Caveat:** "add" also inserts a fresh id into the ever-growing used-id set, so it includes that
+  set's amortized growth. That's honest, because the real engine pays it too, but it's an M6 target.
