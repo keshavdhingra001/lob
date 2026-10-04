@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::book::{BookConfig, Level, OrderBook};
 use crate::command::{Command, Event, RejectReason, TimeInForce};
+use crate::hash::IdBuildHasher;
 use crate::types::{OrderId, Price, Qty, Side};
 
 /// "No index": the end of a list, or no best level.
@@ -102,8 +103,8 @@ pub struct FastBook {
     asks: BTreeMap<Price, u32>,
     /// Cached best level per side (`NIL` when the side is empty). [bids, asks].
     best: [u32; 2],
-    /// Resting order id -> slot.
-    index: HashMap<OrderId, u32>,
+    /// Resting order id -> slot, with a one-multiply hash instead of SipHash (D31).
+    index: HashMap<OrderId, u32, IdBuildHasher>,
     /// The highest id accepted this session (D30).
     last_id: Option<OrderId>,
 }
@@ -425,7 +426,7 @@ impl OrderBook for FastBook {
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
             best: [NIL, NIL],
-            index: HashMap::new(),
+            index: HashMap::default(),
             last_id: None,
         }
     }

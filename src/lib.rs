@@ -7,6 +7,7 @@ pub mod command;
 pub mod error;
 pub mod fast;
 pub mod gen;
+pub mod hash;
 pub mod journal;
 pub mod latency;
 pub mod ledger;
