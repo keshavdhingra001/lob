@@ -24,7 +24,7 @@ fn reference_book_passes_every_scenario() {
     for path in scenario_files() {
         let script = fs::read_to_string(&path).unwrap();
         let name = path.file_name().unwrap().to_string_lossy();
-        match transcript(&mut RefBook::new(), &script) {
+        match transcript::<RefBook>(&script) {
             Ok(actual) => {
                 if let Some(diff) = first_difference(&script, &actual) {
                     failures.push(format!("{name}: {diff}"));

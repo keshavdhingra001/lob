@@ -1,0 +1,38 @@
+limit 1 sell 5 100
+> accepted 1
+limit 2 sell 5 101
+> accepted 2
+
+# IOC fills what crosses now and cancels the rest. It never rests.
+limit 3 buy 8 100 ioc
+> accepted 3
+> trade 3 1 buy 5 100
+> cancelled 3 3
+book
+> ask 101 5 (1)
+
+# FOK: only 5 crosses at or below 101 (the 5 at 102 is beyond the limit), so it's
+# killed whole and nothing trades.
+limit 4 sell 5 102
+> accepted 4
+limit 5 buy 6 101 fok
+> accepted 5
+> cancelled 5 6
+book
+> ask 102 5 (1)
+> ask 101 5 (1)
+
+# With a higher limit there's enough: it fills completely, across levels.
+limit 6 buy 7 102 fok
+> accepted 6
+> trade 6 2 buy 5 101
+> trade 6 4 buy 2 102
+book
+> ask 102 3 (1)
+
+# An IOC that crosses nothing is cancelled whole.
+limit 7 sell 4 105 ioc
+> accepted 7
+> cancelled 7 4
+book
+> ask 102 3 (1)

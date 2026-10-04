@@ -37,6 +37,12 @@ Prices are integer ticks (`10025` is $100.25 with a one-cent tick). A trade line
 - **Scenario tests**: scripts of commands and their expected events
   ([tests/scenarios](tests/scenarios)), checked against every book. An invariant checker runs
   after every command, and the tests are mutation-checked.
+- **Order lifecycle**: modify with exchange-style priority rules (a lower size keeps your place,
+  anything else moves you to the back), plus IOC, fill-or-kill and post-only orders, and tick size
+  and fat-finger quantity limits.
+- **Conservation ledger**: an outside check that rebuilds every order's open quantity from the
+  event stream alone and matches it against the book after each command, over thousands of
+  random sessions.
 - **Command and event model** with a text format whose parser and printer round-trip.
 
 ## Planned headline results

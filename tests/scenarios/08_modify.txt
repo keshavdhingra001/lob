@@ -1,0 +1,54 @@
+# Reducing quantity at the same price keeps queue priority.
+limit 1 buy 10 100
+> accepted 1
+limit 2 buy 10 100
+> accepted 2
+modify 1 4 100
+> modified 1 4 100
+market 3 sell 5
+> accepted 3
+> trade 3 1 sell 4 100
+> trade 3 2 sell 1 100
+book
+> bid 100 9 (1)
+
+# Increasing quantity loses priority: the order moves to the back of its level.
+limit 4 buy 5 100
+> accepted 4
+modify 2 20 100
+> modified 2 20 100
+market 5 sell 6
+> accepted 5
+> trade 5 4 sell 5 100
+> trade 5 2 sell 1 100
+book
+> bid 100 19 (1)
+
+# A price change loses priority too, and the new price can trade right away.
+limit 6 sell 8 103
+> accepted 6
+limit 7 buy 3 99
+> accepted 7
+modify 7 5 103
+> modified 7 5 103
+> trade 7 6 buy 5 103
+book
+> ask 103 3 (1)
+> bid 100 19 (1)
+
+# A modify that partly fills rests the rest at its new price.
+modify 2 10 104
+> modified 2 10 104
+> trade 2 6 buy 3 103
+book
+> bid 104 7 (1)
+
+# Rejected: a finished or unknown order, or zero quantity (use cancel for that).
+modify 6 5 103
+> rejected 6 unknown-order
+modify 99 5 100
+> rejected 99 unknown-order
+modify 2 0 104
+> rejected 2 zero-qty
+book
+> bid 104 7 (1)

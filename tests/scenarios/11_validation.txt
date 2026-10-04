@@ -1,0 +1,33 @@
+# Tick size 5, max quantity 100.
+config 5 100
+limit 1 buy 10 1003
+> rejected 1 bad-tick
+limit 1 buy 101 1000
+> rejected 1 qty-too-large
+market 1 sell 101
+> rejected 1 qty-too-large
+limit 1 buy 100 1000
+> accepted 1
+limit 2 sell 10 1005
+> accepted 2
+
+# A modify is validated like a new order, and a rejected one changes nothing.
+modify 2 10 1007
+> rejected 2 bad-tick
+modify 2 101 1005
+> rejected 2 qty-too-large
+book
+> ask 1005 10 (1)
+> bid 1000 100 (1)
+
+# Negative prices on the grid are fine.
+limit 3 sell 5 -15
+> accepted 3
+> trade 3 1 sell 5 1000
+
+# A new config starts over with an empty book.
+config 1 1000000
+book
+> empty
+limit 1 buy 1 1003
+> accepted 1

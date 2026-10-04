@@ -7,10 +7,12 @@ use lob::RefBook;
 
 const HELP: &str = "\
 commands:
-  limit  <id> <buy|sell> <qty> <price>   prices are integer ticks
+  limit  <id> <buy|sell> <qty> <price> [gtc|ioc|fok|post]   prices are integer ticks
   market <id> <buy|sell> <qty>
+  modify <id> <qty> <price>                                  qty = new open quantity
   cancel <id>
-  book                                   asks above bids, highest price first
+  book                                                       asks above bids, highest first
+  config <tick_size> <max_qty>                               start over with these rules
   help | quit";
 
 fn main() -> io::Result<()> {

@@ -1,0 +1,46 @@
+limit 1 sell 5 101
+> accepted 1
+
+# A post-only order that would trade is rejected, and its id stays free.
+limit 2 buy 5 101 post
+> rejected 2 would-cross
+# One tick lower it adds liquidity, so it rests.
+limit 2 buy 5 100 post
+> accepted 2
+book
+> ask 101 5 (1)
+> bid 100 5 (1)
+
+# A post-only order keeps its protection: a modify that would cross is rejected,
+# and the order stays exactly as it was.
+modify 2 5 101
+> rejected 2 would-cross
+book
+> ask 101 5 (1)
+> bid 100 5 (1)
+
+# A plain limit order can be modified across the spread, and it trades.
+limit 3 buy 2 99
+> accepted 3
+modify 3 2 101
+> modified 3 2 101
+> trade 3 1 buy 2 101
+book
+> ask 101 3 (1)
+> bid 100 5 (1)
+
+# Reducing a post-only order in place is fine.
+modify 2 1 100
+> modified 2 1 100
+book
+> ask 101 3 (1)
+> bid 100 1 (1)
+
+# It's still post-only after a modify that moved it.
+modify 2 3 99
+> modified 2 3 99
+modify 2 3 101
+> rejected 2 would-cross
+book
+> ask 101 3 (1)
+> bid 99 3 (1)

@@ -5,7 +5,7 @@ use thiserror::Error;
 pub enum ParseError {
     #[error("empty line")]
     Empty,
-    #[error("unknown command `{0}` (expected limit, market or cancel)")]
+    #[error("unknown command `{0}` (expected limit, market, modify or cancel)")]
     UnknownCommand(String),
     #[error("`{command}` takes {expected} arguments, got {got}")]
     WrongArgCount {
@@ -15,6 +15,8 @@ pub enum ParseError {
     },
     #[error("invalid side `{0}` (expected buy or sell)")]
     BadSide(String),
+    #[error("invalid time in force `{0}` (expected gtc, ioc, fok or post)")]
+    BadTimeInForce(String),
     #[error("invalid {field} `{value}`")]
     BadNumber { field: &'static str, value: String },
 }

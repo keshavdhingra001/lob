@@ -5,27 +5,35 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
-use crate::book::{Level, OrderBook};
-use crate::command::{Command, Event, RejectReason};
+use crate::book::{BookConfig, Level, OrderBook};
+use crate::command::{Command, Event, RejectReason, TimeInForce};
 use crate::types::{OrderId, Price, Qty, Side};
 
 #[derive(Clone, Copy, Debug)]
 struct Resting {
     id: OrderId,
     qty: Qty,
+    /// Remembered so a modify can't turn a post-only order into a taker (D11).
+    post_only: bool,
 }
 
 /// Price -> orders at that price, oldest first.
 type Levels = BTreeMap<Price, VecDeque<Resting>>;
 
-#[derive(Default)]
 pub struct RefBook {
+    config: BookConfig,
     bids: Levels,
     asks: Levels,
-    /// Where each resting order lives, so cancel can find it.
+    /// Where each resting order lives, so cancel and modify can find it.
     resting: HashMap<OrderId, (Side, Price)>,
     /// Every id accepted this session; reusing one is rejected (D9).
     used: HashSet<OrderId>,
+}
+
+impl Default for RefBook {
+    fn default() -> Self {
+        Self::with_config(BookConfig::default())
+    }
 }
 
 impl RefBook {
@@ -40,6 +48,60 @@ impl RefBook {
         }
     }
 
+    fn levels_mut(&mut self, side: Side) -> &mut Levels {
+        match side {
+            Side::Buy => &mut self.bids,
+            Side::Sell => &mut self.asks,
+        }
+    }
+
+    /// The best (first-to-match) price on `side`.
+    fn best(&self, side: Side) -> Option<Price> {
+        match side {
+            Side::Buy => self.bids.last_key_value().map(|(&p, _)| p),
+            Side::Sell => self.asks.first_key_value().map(|(&p, _)| p),
+        }
+    }
+
+    /// Whether an order on `side` at `price` would trade on arrival.
+    fn would_cross(&self, side: Side, price: Price) -> bool {
+        self.best(side.opposite())
+            .is_some_and(|best| side.crosses(price, best))
+    }
+
+    /// Whether the opposite side holds at least `qty` at prices crossing `limit` (for FOK).
+    fn can_fill(&self, side: Side, qty: Qty, limit: Price) -> bool {
+        let levels = self.levels(side.opposite());
+        let crossing: Box<dyn Iterator<Item = (&Price, &VecDeque<Resting>)>> = match side {
+            Side::Buy => Box::new(levels.iter()),
+            Side::Sell => Box::new(levels.iter().rev()),
+        };
+        let mut available = 0;
+        for (&price, queue) in crossing {
+            if !side.crosses(limit, price) {
+                break;
+            }
+            available += queue.iter().map(|o| o.qty.0).sum::<u64>();
+            if available >= qty.0 {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Checks shared by new orders and modifies (D14).
+    fn validate(&self, qty: Qty, price: Option<Price>) -> Result<(), RejectReason> {
+        if qty.0 == 0 {
+            Err(RejectReason::ZeroQty)
+        } else if qty.0 > self.config.max_qty {
+            Err(RejectReason::QtyTooLarge)
+        } else if price.is_some_and(|p| p.0 % self.config.tick_size != 0) {
+            Err(RejectReason::BadTick)
+        } else {
+            Ok(())
+        }
+    }
+
     /// A new limit (`limit = Some`) or market (`limit = None`) order.
     fn submit(
         &mut self,
@@ -47,41 +109,54 @@ impl RefBook {
         side: Side,
         qty: Qty,
         limit: Option<Price>,
+        tif: TimeInForce,
         out: &mut Vec<Event>,
     ) {
-        let reject = if qty.0 == 0 {
-            Some(RejectReason::ZeroQty)
-        } else if self.used.contains(&id) {
-            Some(RejectReason::DuplicateId)
-        } else {
-            None
-        };
-        if let Some(reason) = reject {
+        let check = self.validate(qty, limit).and_then(|()| {
+            if self.used.contains(&id) {
+                Err(RejectReason::DuplicateId)
+            } else if tif == TimeInForce::PostOnly
+                && limit.is_some_and(|price| self.would_cross(side, price))
+            {
+                Err(RejectReason::WouldCross)
+            } else {
+                Ok(())
+            }
+        });
+        if let Err(reason) = check {
             out.push(Event::Rejected { id, reason });
             return;
         }
         self.used.insert(id);
         out.push(Event::Accepted { id });
 
+        if tif == TimeInForce::Fok {
+            let limit = limit.expect("only limit orders carry a time in force");
+            if !self.can_fill(side, qty, limit) {
+                out.push(Event::Cancelled { id, remaining: qty });
+                return;
+            }
+        }
         let remaining = self.take(id, side, qty, limit, out);
         if remaining.0 == 0 {
             return;
         }
-        match limit {
-            Some(price) => {
-                let levels = match side {
-                    Side::Buy => &mut self.bids,
-                    Side::Sell => &mut self.asks,
-                };
-                levels
-                    .entry(price)
-                    .or_default()
-                    .push_back(Resting { id, qty: remaining });
-                self.resting.insert(id, (side, price));
+        match (limit, tif) {
+            (Some(price), TimeInForce::Gtc | TimeInForce::PostOnly) => {
+                self.rest(id, side, price, remaining, tif == TimeInForce::PostOnly)
             }
-            // A market order never rests: whatever the book couldn't fill is cancelled.
-            None => out.push(Event::Cancelled { id, remaining }),
+            // Market and IOC orders never rest. (A FOK order that passed `can_fill` filled
+            // completely, so it never gets here.)
+            _ => out.push(Event::Cancelled { id, remaining }),
         }
+    }
+
+    fn rest(&mut self, id: OrderId, side: Side, price: Price, qty: Qty, post_only: bool) {
+        self.levels_mut(side)
+            .entry(price)
+            .or_default()
+            .push_back(Resting { id, qty, post_only });
+        self.resting.insert(id, (side, price));
     }
 
     /// Match `qty` against the opposite side: best price first, oldest order first
@@ -139,19 +214,10 @@ impl RefBook {
         qty
     }
 
-    fn cancel(&mut self, id: OrderId, out: &mut Vec<Event>) {
-        // Filled, cancelled and never-seen ids all land here: none of them is resting.
-        let Some((side, price)) = self.resting.remove(&id) else {
-            out.push(Event::Rejected {
-                id,
-                reason: RejectReason::UnknownOrder,
-            });
-            return;
-        };
-        let levels = match side {
-            Side::Buy => &mut self.bids,
-            Side::Sell => &mut self.asks,
-        };
+    /// Take a resting order out of its level, removing the level if it empties.
+    fn unlink(&mut self, id: OrderId) -> Option<(Side, Price, Resting)> {
+        let (side, price) = self.resting.remove(&id)?;
+        let levels = self.levels_mut(side);
         let queue = levels
             .get_mut(&price)
             .expect("indexed order's level exists");
@@ -164,14 +230,73 @@ impl RefBook {
         if queue.is_empty() {
             levels.remove(&price);
         }
-        out.push(Event::Cancelled {
-            id,
-            remaining: order.qty,
-        });
+        Some((side, price, order))
+    }
+
+    fn cancel(&mut self, id: OrderId, out: &mut Vec<Event>) {
+        // Filled, cancelled and never-seen ids all land here: none of them is resting.
+        match self.unlink(id) {
+            Some((_, _, order)) => out.push(Event::Cancelled {
+                id,
+                remaining: order.qty,
+            }),
+            None => out.push(Event::Rejected {
+                id,
+                reason: RejectReason::UnknownOrder,
+            }),
+        }
+    }
+
+    /// D11: same price and no more quantity keeps queue priority; anything else
+    /// re-enters the order at the back of its new level, and it may trade on the way.
+    fn modify(&mut self, id: OrderId, qty: Qty, price: Price, out: &mut Vec<Event>) {
+        let reject = |out: &mut Vec<Event>, reason| out.push(Event::Rejected { id, reason });
+        let Some(&(side, old_price)) = self.resting.get(&id) else {
+            return reject(out, RejectReason::UnknownOrder);
+        };
+        if let Err(reason) = self.validate(qty, Some(price)) {
+            return reject(out, reason);
+        }
+        let crosses = self.would_cross(side, price);
+        let queue = self
+            .levels_mut(side)
+            .get_mut(&old_price)
+            .expect("indexed order's level exists");
+        let order = queue
+            .iter_mut()
+            .find(|o| o.id == id)
+            .expect("indexed order is in its level");
+
+        if price == old_price && qty <= order.qty {
+            // Reducing in place: nobody behind this order is worse off, so it keeps its spot.
+            order.qty = qty;
+            out.push(Event::Modified { id, qty, price });
+            return;
+        }
+        if order.post_only && crosses {
+            return reject(out, RejectReason::WouldCross);
+        }
+        let (_, _, order) = self.unlink(id).expect("order is resting");
+        out.push(Event::Modified { id, qty, price });
+        let remaining = self.take(id, side, qty, Some(price), out);
+        if remaining.0 > 0 {
+            self.rest(id, side, price, remaining, order.post_only);
+        }
     }
 }
 
 impl OrderBook for RefBook {
+    fn with_config(config: BookConfig) -> Self {
+        config.validate();
+        RefBook {
+            config,
+            bids: Levels::new(),
+            asks: Levels::new(),
+            resting: HashMap::new(),
+            used: HashSet::new(),
+        }
+    }
+
     fn apply(&mut self, cmd: &Command, out: &mut Vec<Event>) {
         match *cmd {
             Command::Limit {
@@ -179,8 +304,12 @@ impl OrderBook for RefBook {
                 side,
                 qty,
                 price,
-            } => self.submit(id, side, qty, Some(price), out),
-            Command::Market { id, side, qty } => self.submit(id, side, qty, None, out),
+                tif,
+            } => self.submit(id, side, qty, Some(price), tif, out),
+            Command::Market { id, side, qty } => {
+                self.submit(id, side, qty, None, TimeInForce::Gtc, out)
+            }
+            Command::Modify { id, qty, price } => self.modify(id, qty, price, out),
             Command::Cancel { id } => self.cancel(id, out),
         }
     }
@@ -198,9 +327,7 @@ impl OrderBook for RefBook {
     }
 
     fn check_invariants(&self) -> Result<(), String> {
-        if let (Some((bid, _)), Some((ask, _))) =
-            (self.bids.last_key_value(), self.asks.first_key_value())
-        {
+        if let (Some(bid), Some(ask)) = (self.best(Side::Buy), self.best(Side::Sell)) {
             if bid >= ask {
                 return Err(format!("crossed book: best bid {bid} >= best ask {ask}"));
             }
@@ -210,6 +337,9 @@ impl OrderBook for RefBook {
             for (&price, queue) in self.levels(side) {
                 if queue.is_empty() {
                     return Err(format!("empty {side} level at {price}"));
+                }
+                if price.0 % self.config.tick_size != 0 {
+                    return Err(format!("{side} level at {price} is off the tick grid"));
                 }
                 for order in queue {
                     count += 1;
@@ -297,21 +427,30 @@ mod tests {
     }
 
     #[test]
+    fn can_fill_counts_only_crossing_levels() {
+        let mut book = RefBook::new();
+        run(
+            &mut book,
+            &[
+                "limit 1 sell 5 100",
+                "limit 2 sell 5 101",
+                "limit 3 sell 5 102",
+            ],
+        );
+        assert!(book.can_fill(Side::Buy, Qty(10), Price(101)));
+        assert!(!book.can_fill(Side::Buy, Qty(11), Price(101)));
+        assert!(book.can_fill(Side::Buy, Qty(15), Price(500)));
+        assert!(!book.can_fill(Side::Buy, Qty(1), Price(99)));
+        assert!(!book.can_fill(Side::Sell, Qty(1), Price(1)));
+    }
+
+    #[test]
     fn invariant_checker_catches_a_crossed_book() {
         let mut book = RefBook::new();
         // Bypass matching to build a book that apply() could never produce.
         for (id, side, price) in [(1, Side::Buy, 101), (2, Side::Sell, 100)] {
-            let id = OrderId(id);
-            let levels = match side {
-                Side::Buy => &mut book.bids,
-                Side::Sell => &mut book.asks,
-            };
-            levels
-                .entry(Price(price))
-                .or_default()
-                .push_back(Resting { id, qty: Qty(1) });
-            book.resting.insert(id, (side, Price(price)));
-            book.used.insert(id);
+            book.rest(OrderId(id), side, Price(price), Qty(1), false);
+            book.used.insert(OrderId(id));
         }
         assert!(book.check_invariants().unwrap_err().contains("crossed"));
     }

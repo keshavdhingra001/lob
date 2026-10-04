@@ -14,7 +14,38 @@ pub struct Level {
     pub orders: usize,
 }
 
+/// Per-instrument rules the engine enforces (D14).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BookConfig {
+    /// Every limit price must be a multiple of this many ticks. Must be positive.
+    pub tick_size: i64,
+    /// The largest quantity one order (or a modify) may have. A fat-finger guard.
+    pub max_qty: u64,
+}
+
+impl Default for BookConfig {
+    fn default() -> Self {
+        BookConfig {
+            tick_size: 1,
+            max_qty: 1_000_000,
+        }
+    }
+}
+
+impl BookConfig {
+    /// Panics on a config no book could enforce sensibly.
+    pub fn validate(&self) {
+        assert!(self.tick_size > 0, "tick_size must be positive");
+        assert!(self.max_qty > 0, "max_qty must be positive");
+    }
+}
+
 pub trait OrderBook {
+    /// An empty book enforcing `config`.
+    fn with_config(config: BookConfig) -> Self
+    where
+        Self: Sized;
+
     /// Apply one command and append the events it causes to `out`, in order.
     ///
     /// `out` is owned by the caller and not cleared, so a hot loop can reuse one

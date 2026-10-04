@@ -11,8 +11,9 @@ clients ──> gateway thread ──SPSC ring──> matching thread ──SPSC
                                            pure, deterministic             command journal (replay)
 ```
 
-Today (M1): the reference book (D8) behind the `OrderBook` trait, matching by D9, checked by
-scenario scripts and an invariant checker (D10).
+Today (M2): the reference book (D8) behind the `OrderBook` trait, matching by D9 with modify
+(D11), IOC/FOK/post-only (D12) and instrument rules (D14). Checked by scenario scripts, an
+invariant checker (D10) and an event-only conservation ledger over random sessions (D13).
 
 ## Decisions
 
@@ -113,3 +114,70 @@ scenario scripts and an invariant checker (D10).
   - the market remainder not cancelled
   - filled orders left in the index, or duplicate ids accepted
   - empty levels not removed (this one made matching loop forever, so it was caught by the timeout)
+
+### D11: Modify (M2)
+- **What:** `modify <id> <qty> <price>` sets a resting order's new *open* quantity and price.
+  Emits `modified <id> <qty> <price>`, then any trades the new price causes.
+- **Priority rule:** same price and the same or lower quantity: changed in place, and it keeps its
+  queue position. Anything else (a new price, or more quantity) takes the order out and re-enters
+  it at the back of its new level. It may trade on the way, like a new order.
+  - **Why:** keeping priority while *adding* quantity would let someone queue a tiny order early
+    and grow it later, jumping everyone who arrived in between. Every major exchange (CME, Nasdaq,
+    LSE) resets priority on a size increase or a price change.
+- **Open quantity, not total quantity:** FIX cancel/replace sends the *total* order quantity, and
+  the exchange subtracts what's already filled. That races with fills in flight (the client
+  doesn't know about a fill yet). Open quantity is simpler and explicit; a gateway (Tier 3) would
+  translate.
+- **Rejects:** unknown or finished order, zero quantity (cancel is the explicit way out), the
+  validation rules (D14), and a post-only order whose new price would cross (D12).
+  A rejected modify changes nothing.
+
+### D12: Time in force (M2)
+- **What:** an optional last token on `limit`: `gtc` (default, so M1 scripts don't change),
+  `ioc`, `fok`, `post`.
+- **IOC:** match now, then `cancelled <id> <rest>`. It never rests, just like a market order with a price limit.
+- **FOK:** a read-only pre-scan (`can_fill`) sums the opposite side's quantity at prices that cross
+  the limit. If that's short, the order is `accepted` and then `cancelled` whole, with no trades.
+  Otherwise it matches normally and is guaranteed to fill completely.
+  - **Alternative:** match, then roll back. That's harder to get right and would emit trades that later "didn't happen".
+  - **Accepted, then cancelled, not rejected:** it was a valid order that the market couldn't
+    satisfy. `rejected` means the order itself was invalid.
+- **Post-only:** rejected `would-cross` if it would trade on arrival, so its id stays free.
+  The flag is remembered on the resting order, so a later modify can't turn it into a taker.
+  - **Alternative:** "slide": reprice it one tick behind the touch. That's common on crypto venues, but it means the engine picks prices for the client.
+- **Self-trade prevention:** moved to Tier 3. It needs an owner/account field on every order, which is a format change best done together with a binary gateway protocol.
+
+### D13: Conservation ledger (M2)
+- **What:** `Ledger` rebuilds every live order's open quantity from the commands and events
+  alone, then after each command compares the total, and the number of live orders, with the
+  book's public depth. It also checks each event is legal:
+  - trades only between open orders, never above an order's open quantity, and never through the taker's limit
+  - cancels report exactly the open quantity
+  - market, IOC and FOK orders are done by the end of their own command
+- **Why:** the invariant checker looks *inside* one book; the ledger checks the *output* contract,
+  which is what M4's fast book must match and what M3's replay records. A book that loses or
+  invents one unit of quantity fails it.
+- **Found on its first run:** a bug in the ledger itself. An IOC rejected as a duplicate shares
+  its id with an older order that's legitimately resting, so "must be done" applies only to
+  accepted orders.
+- **Randomized test:** 30 seeds × 5,000 commands, with narrow prices, small quantities, and some
+  zero, oversized and off-tick values and reused ids. The ledger and invariants are checked after
+  every command, and the test asserts a minimum trade count so a broken generator can't pass
+  silently. A hand-written SplitMix64 (`rng.rs`) keeps seeds stable forever.
+
+### D14: Instrument config (M2)
+- **What:** `BookConfig { tick_size, max_qty }`, defaults 1 and 1,000,000, enforced on new
+  orders and modifies (`bad-tick`, `qty-too-large`). Check order: zero, too large, tick, then id
+  (and for post-only, would-cross). Only one reason is reported, so the order is part of the contract.
+- **Why in the engine:** the tick grid is a property of the book (levels must sit on it, and
+  the invariant checker verifies they do). Max qty is the classic fat-finger guard
+  (Knight Capital and others). Broader pre-trade risk (position and notional limits) is Tier 3.
+- **Scenario support:** a `config <tick> <max>` line starts a fresh book under those rules
+  (`OrderBook::with_config`), so every book implementation can be built the same way.
+- **Mutation-checked (M2):** 12 planted bugs, all caught:
+  - always keeping priority on a modify, or misreporting an in-place modify's quantity
+  - no FOK pre-scan, or a pre-scan that ignores the limit
+  - IOC orders resting
+  - no tick check, or no max-qty check
+  - the post-only check skipped on arrival or on a modify, or the post-only flag lost on rest
+  - the flag lost after a modify moved the order. This one first survived, and a new scenario now covers it.
