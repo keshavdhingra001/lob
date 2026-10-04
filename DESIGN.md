@@ -442,8 +442,8 @@ vs 44 / 61 / 144 for the fast book (58x at p99).
 2. **Rest, cross and market cost the same in both books** at p50 (within about 5 ns). Both pay
    the same shared costs: SipHash lookups, the `BTreeMap` price tree, pushing events.
 3. **The fast book's crossing limits have a slightly worse tail** (p99 469 vs 380 on generated flow, 691 vs 580
-   on the deeper book; p99.9 851 vs 723 and 1,605 vs 1,230). This is consistent across every interleaved run, so it isn't noise. The cause isn't known yet; M6 profiling
-   (perf) should find it. Cache misses in the slab while sweeping are a hypothesis, not a finding.
+   on the deeper book; p99.9 851 vs 723 and 1,605 vs 1,230). This is consistent across every interleaved run, so it isn't noise. D29 shows it
+   comes from crosses that fill many makers: each extra maker costs the fast book more.
 4. **The max (2–15 ms) is the same in both books, and it's the used-id set rehashing.** Commands over 50 µs
    occur at order ids of about 3.6k, 7.3k, 14.6k ... 941k, each double the last. Those are the points where hashbrown's table fills to 7/8 and
    grows. The set of every id ever used never shrinks, so each resize rehashes all of it inside
@@ -452,7 +452,59 @@ vs 44 / 61 / 144 for the fast book (58x at p99).
 5. **About 37% of commands are rejects at about 35 ns**, which is why the overall p50 (58–78 ns) is lower
    than the p50 of any real operation. Per-kind histograms (D26) keep that from hiding anything.
 
-### D29: Profiling with `perf` (pending)
-- **Planned:** `perf stat -e instructions,cycles,cache-misses,branch-misses` per workload and a
-  flamegraph of the fast book. This needs `perf`, which isn't installed (`sudo pacman -S perf`). It sets M6's targets and
-  should explain result 3 above.
+### D29: Profiling with `perf` (M5)
+- **What:** `scripts/profile.sh [cpu] [journal]`:
+  - `perf stat` counts user-space events for `lob run <book>`, which applies the journal 5 times with
+    nothing else in the loop. `lob run none` only decodes the journal and is subtracted.
+  - Then `perf record --call-graph dwarf` on a `profiling` build (release plus debug info) samples where the time goes.
+  - `kernel.perf_event_paranoid = 2` allows all of this for a normal user, as long as it's limited to their own process in user space.
+- **Counters per command** (generated flow, 2M × 5, pinned, `perf stat -r 3`). Spread within a run was 0.1–2%; the
+  reference book's cycles moved about 10% between invocations:
+
+  | | cycles | instructions | IPC | branch misses | L1d misses | LLC misses |
+  |---|---|---|---|---|---|---|
+  | reference | 329–365 | 660 | 1.8–2.0 | 2.9 | 5.5–5.7 | 1.0 |
+  | fast | 277–281 | 596 | 2.1 | 2.1 | 4.0 | 0.9 |
+  | reference, deeper book | 343 | 678 | 2.0 | 2.4 | 8.0 | 1.6 |
+  | fast, deeper book | 303 | 615 | 2.0 | 2.0 | 4.9 | 1.3 |
+
+  The fast book runs 10% fewer instructions with 25–40% fewer L1 misses. IPC is about 2 for both, so neither is stalled on memory overall.
+- **Where the time goes** (fast book, self time, share of all samples including about 10% journal decoding):
+
+  | Function | % |
+  |---|---|
+  | used-id set `contains_key` (the duplicate-id check) | 18.9 |
+  | used-id set `reserve_rehash` (growth) | 11.2 |
+  | id index `remove` (fill or cancel) | 11.0 |
+  | used-id set `insert` | 6.8 |
+  | id index `insert` (rest) | 5.9 |
+  | **hashing, total** | **53.8** |
+  | book logic: `apply`, `rest`, `submit`, `take`, `unlink` | 30.2 |
+
+  The reference book's hashing total is 45% (its queues cost more, so hashing is a smaller share).
+- **M6 targets, in order:**
+  1. **The used-id set** (37% of the fast book's samples): one lookup and one insert for every new order, a table that
+     never shrinks and misses the cache at about 1M entries, and a rehash at every doubling (the multi-ms max in the M5 results). Options for the M6 consult:
+     dense or monotonic ids (a bitmap, or "ids must increase", which is what many venues require per session), a cheaper hasher, or
+     preallocation.
+  2. **The id index** (17%): SipHash on a `u64` key is overkill. A cheaper hasher, or a direct-mapped
+     table if ids are dense.
+  3. **Then the price tree and the order struct layout**, which only become visible once hashing is gone.
+- **The crossing-limit tail (M5 result 3), explained in part:** a scratch run grouped crossing limits by how many makers
+  they filled (books interleaved, run 3 of 5, generated flow):
+
+  | Makers filled | Count | Ref p50 / p99 | Fast p50 / p99 |
+  |---|---|---|---|
+  | 1 | 225,080 | 89 / 434 | 90 / 402 |
+  | 2–3 | 41,523 | 154 / 551 | 159 / 546 |
+  | 4–7 | 23,273 | 237 / 731 | 266 / 713 |
+  | 8+ | 13,198 | 423 / 1,133 | 502 / 1,269 |
+
+  The gap only appears when a cross fills several makers, and it grows with the number filled, so each extra maker
+  costs the fast book more. There are two possible causes, and this run doesn't separate them:
+  - **memory:** each maker is a slab node at a scattered index, while the reference book's queue is a contiguous `VecDeque`
+  - **work:** `unlink` fixes neighbour links, updates the level totals and pushes to the free list, versus one `pop_front`
+
+  M6 can tell them apart with `perf annotate` on `take`/`unlink`, or by filling orders without unlinking them one at a time.
+- **Not done:** an SVG flamegraph (it needs `inferno` or the FlameGraph scripts, which aren't installed). `perf report`'s
+  text output answered the questions above.

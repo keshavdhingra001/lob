@@ -7,6 +7,7 @@
 //! lob bench <journal>                   replay through both books; compare speed and digests
 //! lob gen-queue <orders> <journal>      worst case: one deep queue, cancelled in random order
 //! lob latency <journal> [runs]          per-command latency percentiles for both books
+//! lob run <ref|fast|none> <journal> [repeats]   apply only, no timing: for `perf stat` (D29)
 //! ```
 
 use std::fs::{self, File};
@@ -39,7 +40,9 @@ usage:
   lob bench <journal>                   replay through both books, compare speed and digests
   lob gen-queue <orders> <journal>      worst case for cancel: one deep queue, random cancels
   lob latency <journal> [runs]          per-command latency percentiles, both books
-                                        (runs: default 5; pin it with `taskset -c <cpu>`)";
+                                        (runs: default 5; pin it with `taskset -c <cpu>`)
+  lob run <ref|fast|none> <journal> [repeats]   apply only, nothing timed or printed per command,
+                                        for `perf stat`; `none` only decodes (the baseline)";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -52,6 +55,8 @@ fn main() -> ExitCode {
         ["replay", path, events] => replay_file(path, Some(events)),
         ["bench", path] => bench(path),
         ["gen-queue", n, path] => gen_queue(n, path),
+        ["run", book, path] => run(book, path, "1"),
+        ["run", book, path, repeats] => run(book, path, repeats),
         ["latency", path] => latency(path, "5"),
         ["latency", path, runs] => latency(path, runs),
         _ => Err(USAGE.to_string()),
@@ -234,6 +239,42 @@ fn latency(path: &str, runs: &str) -> Result<(), String> {
     let (reference, fast) = measure_interleaved::<RefBook, FastBook>(commands, runs);
     report("reference", &reference);
     report("fast", &fast);
+    Ok(())
+}
+
+/// Apply a journal `repeats` times, each on a fresh book, with nothing else in the loop,
+/// so `perf stat` counts matching and not timing or printing (D29). `none` decodes the
+/// journal and stops: run it too and subtract, to remove the decoding cost.
+fn run(book: &str, path: &str, repeats: &str) -> Result<(), String> {
+    let repeats: usize = repeats
+        .parse()
+        .map_err(|_| format!("bad repeat count `{repeats}`"))?;
+    let bytes = fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+    let journal = read_journal(&bytes).map_err(|e| format!("{path}: {e}"))?;
+    fn apply_all<B: OrderBook>(commands: &[Command], repeats: usize) -> usize {
+        let mut events = Vec::with_capacity(64);
+        let mut total = 0;
+        for _ in 0..repeats {
+            let mut book = B::with_config(Default::default());
+            for cmd in commands {
+                events.clear();
+                book.apply(cmd, &mut events);
+                total += events.len();
+            }
+        }
+        total
+    }
+    let events = match book {
+        "ref" => apply_all::<RefBook>(&journal.commands, repeats),
+        "fast" => apply_all::<FastBook>(&journal.commands, repeats),
+        "none" => 0,
+        _ => return Err(format!("unknown book `{book}` (ref, fast or none)")),
+    };
+    // Printing the event count keeps the loop's result alive, so it can't be optimized away.
+    println!(
+        "{} commands x {repeats}: {events} events",
+        journal.commands.len()
+    );
     Ok(())
 }
 

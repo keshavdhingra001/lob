@@ -18,6 +18,12 @@ opt-level = 1
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 
+# Release code plus debug info, so `perf report` can name functions and inlined frames (D29).
+# `cargo build --profile profiling`; the release profile itself stays unchanged.
+[profile.profiling]
+inherits = "release"
+debug = true
+
 [[bench]]
 name = "book"
 harness = false
