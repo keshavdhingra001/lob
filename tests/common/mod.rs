@@ -5,7 +5,7 @@ use lob::command::TimeInForce;
 use lob::rng::Rng;
 use lob::{Command, OrderId, Price, Qty, Side};
 
-/// Mostly a fresh id, sometimes an old one (to hit duplicate-id rejects).
+/// Mostly a fresh id, sometimes an old one (to hit id-not-increasing rejects).
 pub fn new_order_id(rng: &mut Rng, next_id: &mut u64) -> OrderId {
     if *next_id > 1 && rng.chance(10) {
         OrderId(1 + rng.below(*next_id - 1))

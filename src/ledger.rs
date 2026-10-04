@@ -43,7 +43,7 @@ impl Ledger {
         self.open.retain(|_, qty| *qty > 0);
 
         // Market, IOC and FOK orders must be done by the end of their own command. (Only
-        // if accepted: a rejected duplicate shares its id with an older order that may rest.)
+        // if accepted: a rejected id that isn't increasing may belong to an older order that rests.)
         let accepted = events.contains(&Event::Accepted { id: cmd.id() });
         let never_rests = accepted
             && matches!(

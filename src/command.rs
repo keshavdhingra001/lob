@@ -79,7 +79,9 @@ pub enum RejectReason {
     ZeroQty,
     QtyTooLarge,
     BadTick,
-    DuplicateId,
+    /// A new order's id must be greater than every id accepted before it this session
+    /// (D30). Reusing an id is the common case of this.
+    IdNotIncreasing,
     UnknownOrder,
     /// A post-only order (or a modify of one) would have traded.
     WouldCross,
@@ -246,7 +248,7 @@ impl fmt::Display for RejectReason {
             RejectReason::ZeroQty => "zero-qty",
             RejectReason::QtyTooLarge => "qty-too-large",
             RejectReason::BadTick => "bad-tick",
-            RejectReason::DuplicateId => "duplicate-id",
+            RejectReason::IdNotIncreasing => "id-not-increasing",
             RejectReason::UnknownOrder => "unknown-order",
             RejectReason::WouldCross => "would-cross",
         })

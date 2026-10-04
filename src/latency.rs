@@ -273,7 +273,7 @@ mod tests {
             },
             Command::Cancel { id: OrderId(5) },
             Command::Cancel { id: OrderId(5) }, // already gone: rejected
-            limit(1, Side::Buy, 1, 90, Gtc),    // duplicate id: rejected
+            limit(1, Side::Buy, 1, 90, Gtc),    // id not increasing: rejected
         ];
         use Kind::*;
         assert_eq!(

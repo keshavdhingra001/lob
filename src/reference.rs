@@ -3,7 +3,7 @@
 //! It's the oracle the fast book (M4) is tested against, so clarity beats speed
 //! everywhere in this file.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use crate::book::{BookConfig, Level, OrderBook};
 use crate::command::{Command, Event, RejectReason, TimeInForce};
@@ -26,8 +26,9 @@ pub struct RefBook {
     asks: Levels,
     /// Where each resting order lives, so cancel and modify can find it.
     resting: HashMap<OrderId, (Side, Price)>,
-    /// Every id accepted this session; reusing one is rejected (D9).
-    used: HashSet<OrderId>,
+    /// The highest id accepted this session. A new order must beat it (D30), which also
+    /// rules out reusing an id, with no per-id memory.
+    last_id: Option<OrderId>,
 }
 
 impl Default for RefBook {
@@ -113,8 +114,8 @@ impl RefBook {
         out: &mut Vec<Event>,
     ) {
         let check = self.validate(qty, limit).and_then(|()| {
-            if self.used.contains(&id) {
-                Err(RejectReason::DuplicateId)
+            if self.last_id.is_some_and(|last| id <= last) {
+                Err(RejectReason::IdNotIncreasing)
             } else if tif == TimeInForce::PostOnly
                 && limit.is_some_and(|price| self.would_cross(side, price))
             {
@@ -127,7 +128,7 @@ impl RefBook {
             out.push(Event::Rejected { id, reason });
             return;
         }
-        self.used.insert(id);
+        self.last_id = Some(id);
         out.push(Event::Accepted { id });
 
         if tif == TimeInForce::Fok {
@@ -293,7 +294,7 @@ impl OrderBook for RefBook {
             bids: Levels::new(),
             asks: Levels::new(),
             resting: HashMap::new(),
-            used: HashSet::new(),
+            last_id: None,
         }
     }
 
@@ -349,7 +350,7 @@ impl OrderBook for RefBook {
                     if self.resting.get(&order.id) != Some(&(side, price)) {
                         return Err(format!("order {} missing from the index", order.id));
                     }
-                    if !self.used.contains(&order.id) {
+                    if self.last_id.is_none_or(|last| order.id > last) {
                         return Err(format!("order {} rests but was never accepted", order.id));
                     }
                 }
@@ -450,7 +451,7 @@ mod tests {
         // Bypass matching to build a book that apply() could never produce.
         for (id, side, price) in [(1, Side::Buy, 101), (2, Side::Sell, 100)] {
             book.rest(OrderId(id), side, Price(price), Qty(1), false);
-            book.used.insert(OrderId(id));
+            book.last_id = Some(OrderId(id));
         }
         assert!(book.check_invariants().unwrap_err().contains("crossed"));
     }

@@ -94,7 +94,7 @@ fn reason_byte(reason: RejectReason) -> u8 {
         RejectReason::ZeroQty => 1,
         RejectReason::QtyTooLarge => 2,
         RejectReason::BadTick => 3,
-        RejectReason::DuplicateId => 4,
+        RejectReason::IdNotIncreasing => 4,
         RejectReason::UnknownOrder => 5,
         RejectReason::WouldCross => 6,
     }

@@ -12,7 +12,7 @@
 //! Correctness is defined by `RefBook`: the differential tests feed both books the same
 //! commands and require identical events.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
 use crate::book::{BookConfig, Level, OrderBook};
 use crate::command::{Command, Event, RejectReason, TimeInForce};
@@ -104,8 +104,8 @@ pub struct FastBook {
     best: [u32; 2],
     /// Resting order id -> slot.
     index: HashMap<OrderId, u32>,
-    /// Every id accepted this session (D9).
-    used: HashSet<OrderId>,
+    /// The highest id accepted this session (D30).
+    last_id: Option<OrderId>,
 }
 
 fn side_ix(side: Side) -> usize {
@@ -194,8 +194,8 @@ impl FastBook {
         out: &mut Vec<Event>,
     ) {
         let check = self.validate(qty, limit).and_then(|()| {
-            if self.used.contains(&id) {
-                Err(RejectReason::DuplicateId)
+            if self.last_id.is_some_and(|last| id <= last) {
+                Err(RejectReason::IdNotIncreasing)
             } else if tif == TimeInForce::PostOnly
                 && limit.is_some_and(|price| self.would_cross(side, price))
             {
@@ -208,7 +208,7 @@ impl FastBook {
             out.push(Event::Rejected { id, reason });
             return;
         }
-        self.used.insert(id);
+        self.last_id = Some(id);
         out.push(Event::Accepted { id });
 
         if tif == TimeInForce::Fok {
@@ -426,7 +426,7 @@ impl OrderBook for FastBook {
             asks: BTreeMap::new(),
             best: [NIL, NIL],
             index: HashMap::new(),
-            used: HashSet::new(),
+            last_id: None,
         }
     }
 
@@ -491,7 +491,9 @@ impl OrderBook for FastBook {
                     if node.qty == 0 {
                         return Err(format!("order {} rests with zero qty", node.id));
                     }
-                    if self.index.get(&node.id) != Some(&slot) || !self.used.contains(&node.id) {
+                    if self.index.get(&node.id) != Some(&slot)
+                        || self.last_id.is_none_or(|last| node.id > last)
+                    {
                         return Err(format!("order {} missing from the index", node.id));
                     }
                     total += node.qty;

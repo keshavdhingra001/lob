@@ -10,19 +10,33 @@ book
 limit 1 buy 10 10000
 > accepted 1
 
-# Reusing an id is rejected while the order rests...
+# Ids must increase (D30), so reusing an id is rejected while the order rests...
 limit 1 sell 5 10100
-> rejected 1 duplicate-id
+> rejected 1 id-not-increasing
 # ...after it's cancelled...
 cancel 1
 > cancelled 1 10
 limit 1 buy 10 10000
-> rejected 1 duplicate-id
+> rejected 1 id-not-increasing
 # ...and after a market order is done.
 market 2 buy 5
 > accepted 2
 > cancelled 2 5
 market 2 buy 5
-> rejected 2 duplicate-id
+> rejected 2 id-not-increasing
 book
 > empty
+
+# Gaps are fine: an id only has to beat the highest one accepted so far.
+limit 10 buy 1 10000
+> accepted 10
+# A lower id is rejected even though it was never used.
+limit 5 buy 1 10000
+> rejected 5 id-not-increasing
+# Rejected orders don't raise the bar: 12 is refused (bad qty), so 11 is still fine.
+limit 12 buy 0 10000
+> rejected 12 zero-qty
+limit 11 buy 1 10000
+> accepted 11
+book
+> bid 10000 2 (2)
