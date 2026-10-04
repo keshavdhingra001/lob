@@ -11,9 +11,11 @@ clients ──> gateway thread ──SPSC ring──> matching thread ──SPSC
                                            pure, deterministic             command journal (replay)
 ```
 
-Today (M2): the reference book (D8) behind the `OrderBook` trait, matching by D9 with modify
+Today (M3): the reference book (D8) behind the `OrderBook` trait, matching by D9 with modify
 (D11), IOC/FOK/post-only (D12) and instrument rules (D14). Checked by scenario scripts, an
 invariant checker (D10) and an event-only conservation ledger over random sessions (D13).
+Input is recorded in a binary journal (D15, D16); replay produces a sequenced event stream and a
+digest (D17). A seeded generator (D18) supplies realistic order flow.
 
 ## Decisions
 
@@ -181,3 +183,72 @@ invariant checker (D10) and an event-only conservation ledger over random sessio
   - no tick check, or no max-qty check
   - the post-only check skipped on arrival or on a modify, or the post-only flag lost on rest
   - the flag lost after a modify moved the order. This one first survived, and a new scenario now covers it.
+
+### D15: Command journal format (M3)
+- **What:** an 8-byte header (`LOBJ`, version u32), then records `[crc32][len u16][payload]`. The CRC
+  covers the length and the payload. Payloads are a tag byte plus fixed-width little-endian fields
+  (27 bytes for a limit). Full layout is in `src/journal.rs`.
+- **Why binary:** about 27 bytes per command (20,000 commands is 540 KB), and decoding is a few
+  loads with no parsing, so replaying millions of commands is dominated by matching, not I/O.
+  The text format (D6) stays for humans.
+- **Why the CRC covers the length:** a flipped length would otherwise send the reader to a random
+  offset with nothing to catch it (the same lesson as lsmkv's D1).
+- **Version field:** a future format (an owner field for self-trade prevention, timestamps) can
+  coexist with old recordings instead of silently misreading them.
+- **Not a WAL:** the journal is a recording of input, written with a `BufWriter` and never fsynced
+  per record. Crash-safe journaling for recovery is Tier 3, and lsmkv's group commit is the model for it.
+
+### D16: Damaged journals
+- **Torn tail** (the file ends inside a record, or the *last* record fails its CRC): replay the
+  complete records and report `torn_tail` with the offset. That's what a crash mid-write leaves.
+- **A bad record followed by more data:** `Corrupt(offset)`, refuse to replay. A crash can only
+  tear the end, so damage in the middle means the file is bad, and replaying part of a session
+  would produce a plausible but wrong book. It's the same rule as lsmkv's D2.
+- **A valid CRC around an undecodable payload** (unknown tag, bad side or TIF byte, wrong length):
+  `InvalidRecord`. That's a bug or a version mismatch, not disk damage.
+- **Known limit:** a damaged length that points past EOF is indistinguishable from a torn
+  write. Only a header checksum would separate them (the same limit as lsmkv's D2).
+- **Tests:** every truncation point, and every byte of every non-last record flipped.
+  A flipped CRC or payload byte must be `Corrupt`; only a flipped length byte may read as torn.
+
+### D17: Replay output and digest
+- **What:** each event becomes `seq u64 | tag | fixed-width fields`, with sequence numbers starting at 1
+  and counting every event in the session. The digest is FNV-1a 64 over exactly those bytes, and
+  `lob replay <journal> <events-file>` writes them out.
+- **Why sequence numbers:** downstream consumers (market data in M8, a replica) detect a gap or a
+  duplicate by the number alone, which is how exchange feeds work (ITCH, MoldUDP64).
+- **Why FNV-1a:** hand-written in 10 lines and frozen, so a digest recorded today stays valid. It
+  isn't cryptographic: it detects accidental divergence, not tampering. Checked against published
+  test vectors.
+- **Golden digest:** seed 1 × 20,000 commands gives `f0cd0c4be21b0c27` (28,834 events,
+  8,316 trades, 5,519 rejects), pinned in `tests/replay.rs`. A deliberate change to matching
+  updates it here with a reason; an accidental one is a bug.
+  The same digest comes out of a debug test build and the release CLI.
+- **Proof of determinism:**
+  - two runs give byte-identical streams
+  - replaying from a journal gives the same result as replaying from memory
+  - a different seed, or one dropped command, changes the digest
+
+### D18: Synthetic order flow
+- **What:** a seeded generator with a random-walk mid (10% of steps move one tick). The mix:
+  - 48% passive limits, 1–12 ticks from the mid and skewed to the touch, about 10% of them post-only
+  - 8% aggressive limits up to 3 ticks through the mid (half IOC, a quarter FOK, a quarter GTC)
+  - 4% market orders
+  - 30% cancels and 10% modifies of orders it believes are live (half reduce in place, half move the price)
+  - Lot sizes 1–500, mostly small. It tracks at most 5,000 live orders.
+- **Shape:** for seed 1 the book settles around 700 resting orders over about 90 levels. 28% of commands are
+  rejected, almost all late cancels and modifies of orders that already filled: the generator
+  can't see the book, the same as a real client with fills in flight.
+- **Alternatives:** uniform random prices (no queue build-up at the touch, so matching is rarely
+  exercised), or real data (M7, ITCH).
+- **Mutation-checked (M3):** 10 planted bugs, all caught after two test fixes:
+  - mid-file damage read as a torn tail, or a torn tail read as corruption
+  - trailing payload bytes accepted
+  - side bytes swapped, the CRC skipping the length, or the version not checked
+  - sequence numbers not counted, the final chunk left out of the hash, the FNV prime changed, or reject codes swapped
+  - Survivors at first: "mid-file damage read as torn" (the bit-flip test was too lenient) and
+    "trailing bytes accepted" (no test).
+
+### Build profile
+- `[profile.dev] opt-level = 1`: the randomized and replay tests run O(book) checks after every
+  command. Unoptimized, the suite took about 30 s; now it's about 2 s. Debug info and overflow checks stay on.

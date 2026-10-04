@@ -1,0 +1,255 @@
+//! Seeded synthetic order flow (D18).
+//!
+//! Not a market model, but shaped like real order flow where it matters for a book:
+//! - the mid price takes a random walk, so levels are created and emptied all the time
+//! - most orders are passive and land a few ticks from the mid, so queues build up at
+//!   the touch, where matching happens
+//! - cancels and modifies are frequent (on real venues most orders are cancelled, not filled)
+//! - a minority of orders cross: aggressive limits, IOCs, FOKs and markets
+//!
+//! The generator can't see the book, so some cancels and modifies target orders that
+//! already filled, and those come back `rejected unknown-order`, as late cancels do on
+//! real venues.
+
+use crate::command::{Command, TimeInForce};
+use crate::rng::Rng;
+use crate::types::{OrderId, Price, Qty, Side};
+
+#[derive(Clone, Copy, Debug)]
+pub struct GenConfig {
+    pub seed: u64,
+    /// Starting mid price, in ticks.
+    pub start_mid: i64,
+    /// Orders the generator tracks for cancels and modifies. Bounds its memory too.
+    pub max_live: usize,
+}
+
+impl Default for GenConfig {
+    fn default() -> Self {
+        GenConfig {
+            seed: 1,
+            start_mid: 10_000,
+            max_live: 5_000,
+        }
+    }
+}
+
+/// An order the generator believes may still rest.
+#[derive(Clone, Copy)]
+struct Live {
+    id: OrderId,
+    side: Side,
+    price: i64,
+    qty: u64,
+}
+
+pub struct Generator {
+    rng: Rng,
+    mid: i64,
+    next_id: u64,
+    max_live: usize,
+    live: Vec<Live>,
+}
+
+impl Generator {
+    pub fn new(config: GenConfig) -> Self {
+        Generator {
+            rng: Rng::new(config.seed),
+            mid: config.start_mid,
+            next_id: 1,
+            max_live: config.max_live,
+            live: Vec::new(),
+        }
+    }
+
+    fn fresh_id(&mut self) -> OrderId {
+        self.next_id += 1;
+        OrderId(self.next_id - 1)
+    }
+
+    fn side(&mut self) -> Side {
+        if self.rng.chance(50) {
+            Side::Buy
+        } else {
+            Side::Sell
+        }
+    }
+
+    /// Mostly small round lots, occasionally a large one.
+    fn qty(&mut self) -> u64 {
+        const LOTS: [u64; 8] = [1, 5, 10, 10, 20, 50, 100, 500];
+        LOTS[self.rng.below(LOTS.len() as u64) as usize]
+    }
+
+    /// Ticks away from the mid on the passive side: skewed towards the touch.
+    fn passive_offset(&mut self) -> i64 {
+        let spread = self.rng.below(12) + 1;
+        1 + self.rng.below(spread) as i64
+    }
+
+    fn passive_price(&mut self, side: Side) -> i64 {
+        let offset = self.passive_offset();
+        match side {
+            Side::Buy => self.mid - offset,
+            Side::Sell => self.mid + offset,
+        }
+    }
+
+    /// A price up to 3 ticks through the mid: likely to trade.
+    fn aggressive_price(&mut self, side: Side) -> i64 {
+        let through = self.rng.below(4) as i64;
+        match side {
+            Side::Buy => self.mid + through,
+            Side::Sell => self.mid - through,
+        }
+    }
+
+    fn limit(&mut self, side: Side, price: i64, qty: u64, tif: TimeInForce) -> Command {
+        let id = self.fresh_id();
+        if matches!(tif, TimeInForce::Gtc | TimeInForce::PostOnly) {
+            self.live.push(Live {
+                id,
+                side,
+                price,
+                qty,
+            });
+        }
+        Command::Limit {
+            id,
+            side,
+            qty: Qty(qty),
+            price: Price(price),
+            tif,
+        }
+    }
+
+    fn passive(&mut self) -> Command {
+        let side = self.side();
+        let price = self.passive_price(side);
+        let qty = self.qty();
+        let tif = if self.rng.chance(10) {
+            TimeInForce::PostOnly
+        } else {
+            TimeInForce::Gtc
+        };
+        self.limit(side, price, qty, tif)
+    }
+
+    fn cancel(&mut self) -> Command {
+        let i = self.rng.below(self.live.len() as u64) as usize;
+        let order = self.live.swap_remove(i);
+        Command::Cancel { id: order.id }
+    }
+
+    fn modify(&mut self) -> Command {
+        let i = self.rng.below(self.live.len() as u64) as usize;
+        let order = &mut self.live[i];
+        if self.rng.chance(50) {
+            // Reduce in place: keeps priority.
+            order.qty = (order.qty / 2).max(1);
+        } else {
+            let offset = 1 + self.rng.below(6) as i64;
+            order.price = match order.side {
+                Side::Buy => self.mid - offset,
+                Side::Sell => self.mid + offset,
+            };
+            order.qty = LOTS_FOR_MODIFY[self.rng.below(4) as usize];
+        }
+        Command::Modify {
+            id: order.id,
+            qty: Qty(order.qty),
+            price: Price(order.price),
+        }
+    }
+}
+
+const LOTS_FOR_MODIFY: [u64; 4] = [1, 10, 20, 50];
+
+impl Iterator for Generator {
+    type Item = Command;
+
+    /// Never ends; use `take(n)`.
+    fn next(&mut self) -> Option<Command> {
+        if self.rng.chance(10) {
+            self.mid += if self.rng.chance(50) { 1 } else { -1 };
+        }
+        let roll = self.rng.below(100);
+        let cmd = if self.live.len() >= self.max_live || (roll < 30 && !self.live.is_empty()) {
+            self.cancel()
+        } else if roll < 40 && !self.live.is_empty() {
+            self.modify()
+        } else if roll < 48 {
+            let side = self.side();
+            let price = self.aggressive_price(side);
+            let qty = self.qty();
+            let tif = match self.rng.below(4) {
+                0 | 1 => TimeInForce::Ioc,
+                2 => TimeInForce::Fok,
+                _ => TimeInForce::Gtc,
+            };
+            self.limit(side, price, qty, tif)
+        } else if roll < 52 {
+            let id = self.fresh_id();
+            let side = self.side();
+            let qty = self.qty().min(50);
+            Command::Market {
+                id,
+                side,
+                qty: Qty(qty),
+            }
+        } else {
+            self.passive()
+        };
+        Some(cmd)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn same_seed_same_flow() {
+        let a: Vec<Command> = Generator::new(GenConfig::default()).take(5_000).collect();
+        let b: Vec<Command> = Generator::new(GenConfig::default()).take(5_000).collect();
+        assert_eq!(a, b);
+        let c: Vec<Command> = Generator::new(GenConfig {
+            seed: 2,
+            ..GenConfig::default()
+        })
+        .take(5_000)
+        .collect();
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn mix_has_every_command_kind() {
+        let mut counts = [0usize; 4];
+        for cmd in Generator::new(GenConfig::default()).take(20_000) {
+            counts[match cmd {
+                Command::Limit { .. } => 0,
+                Command::Market { .. } => 1,
+                Command::Modify { .. } => 2,
+                Command::Cancel { .. } => 3,
+            }] += 1;
+        }
+        // Roughly 56% limits, 4% markets, 10% modifies, 30% cancels.
+        let pct: Vec<usize> = counts.iter().map(|c| c * 100 / 20_000).collect();
+        assert!((50..=62).contains(&pct[0]), "{pct:?}");
+        assert!((2..=6).contains(&pct[1]), "{pct:?}");
+        assert!((7..=13).contains(&pct[2]), "{pct:?}");
+        assert!((25..=35).contains(&pct[3]), "{pct:?}");
+    }
+
+    #[test]
+    fn live_set_is_bounded() {
+        let mut g = Generator::new(GenConfig {
+            max_live: 100,
+            ..GenConfig::default()
+        });
+        for _ in 0..10_000 {
+            g.next();
+            assert!(g.live.len() <= 100);
+        }
+    }
+}

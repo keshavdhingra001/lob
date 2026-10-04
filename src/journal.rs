@@ -1,0 +1,448 @@
+//! The command journal (D15): a binary recording of the engine's input.
+//!
+//! Because the engine is deterministic (D4), the journal alone reproduces every event
+//! and the final book. Layout:
+//!
+//! ```text
+//! header:  "LOBJ" | version u32
+//! record:  crc32 u32 | len u16 | payload (len bytes)      crc covers len + payload
+//! payload: tag u8, then fixed-width little-endian fields:
+//!   1 limit   id u64 | side u8 | qty u64 | price i64 | tif u8     (27 bytes)
+//!   2 market  id u64 | side u8 | qty u64                         (18 bytes)
+//!   3 modify  id u64 | qty u64 | price i64                       (25 bytes)
+//!   4 cancel  id u64                                             ( 9 bytes)
+//! ```
+
+use std::io::{self, Write};
+
+use thiserror::Error;
+
+use crate::command::{Command, TimeInForce};
+use crate::types::{OrderId, Price, Qty, Side};
+
+pub const MAGIC: &[u8; 4] = b"LOBJ";
+pub const VERSION: u32 = 1;
+const HEADER_LEN: usize = 8;
+/// crc32 + len.
+const RECORD_HEADER_LEN: usize = 6;
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum JournalError {
+    #[error("not a journal (bad magic)")]
+    BadMagic,
+    #[error("unsupported journal version {0}")]
+    UnsupportedVersion(u32),
+    /// A record failed its checksum and more data follows it, so this isn't a torn
+    /// write from a crash: the file is damaged (D16).
+    #[error("corrupt record at offset {0}")]
+    Corrupt(u64),
+    /// The checksum passed but the payload doesn't decode: a bug or a format mismatch.
+    #[error("invalid record at offset {offset}: {reason}")]
+    InvalidRecord { offset: u64, reason: &'static str },
+}
+
+/// A decoded journal.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Journal {
+    pub commands: Vec<Command>,
+    /// Set when the file ends in an incomplete or damaged last record: the offset
+    /// where the valid data ends. Everything before it was decoded.
+    pub torn_tail: Option<u64>,
+}
+
+pub struct JournalWriter<W: Write> {
+    out: W,
+    buf: Vec<u8>,
+}
+
+impl<W: Write> JournalWriter<W> {
+    /// Writes the header. Wrap `out` in a `BufWriter` for files.
+    pub fn new(mut out: W) -> io::Result<Self> {
+        out.write_all(MAGIC)?;
+        out.write_all(&VERSION.to_le_bytes())?;
+        Ok(JournalWriter {
+            out,
+            buf: Vec::with_capacity(64),
+        })
+    }
+
+    pub fn append(&mut self, cmd: &Command) -> io::Result<()> {
+        let mut payload = [0u8; 32];
+        let len = encode_command(cmd, &mut payload);
+        let len_bytes = (len as u16).to_le_bytes();
+        let mut crc = crc32fast::Hasher::new();
+        crc.update(&len_bytes);
+        crc.update(&payload[..len]);
+        self.buf.clear();
+        self.buf.extend_from_slice(&crc.finalize().to_le_bytes());
+        self.buf.extend_from_slice(&len_bytes);
+        self.buf.extend_from_slice(&payload[..len]);
+        self.out.write_all(&self.buf)
+    }
+
+    /// Flush and hand back the underlying writer.
+    pub fn finish(mut self) -> io::Result<W> {
+        self.out.flush()?;
+        Ok(self.out)
+    }
+}
+
+/// Encode `cmd` into `buf`, returning the payload length.
+pub fn encode_command(cmd: &Command, buf: &mut [u8; 32]) -> usize {
+    let mut w = Cursor { buf, pos: 0 };
+    match *cmd {
+        Command::Limit {
+            id,
+            side,
+            qty,
+            price,
+            tif,
+        } => {
+            w.u8(1);
+            w.u64(id.0);
+            w.u8(side_byte(side));
+            w.u64(qty.0);
+            w.u64(price.0 as u64);
+            w.u8(tif_byte(tif));
+        }
+        Command::Market { id, side, qty } => {
+            w.u8(2);
+            w.u64(id.0);
+            w.u8(side_byte(side));
+            w.u64(qty.0);
+        }
+        Command::Modify { id, qty, price } => {
+            w.u8(3);
+            w.u64(id.0);
+            w.u64(qty.0);
+            w.u64(price.0 as u64);
+        }
+        Command::Cancel { id } => {
+            w.u8(4);
+            w.u64(id.0);
+        }
+    }
+    w.pos
+}
+
+pub fn decode_command(payload: &[u8]) -> Result<Command, &'static str> {
+    let mut r = Reader { buf: payload };
+    let cmd = match r.u8()? {
+        1 => Command::Limit {
+            id: OrderId(r.u64()?),
+            side: byte_side(r.u8()?)?,
+            qty: Qty(r.u64()?),
+            price: Price(r.u64()? as i64),
+            tif: byte_tif(r.u8()?)?,
+        },
+        2 => Command::Market {
+            id: OrderId(r.u64()?),
+            side: byte_side(r.u8()?)?,
+            qty: Qty(r.u64()?),
+        },
+        3 => Command::Modify {
+            id: OrderId(r.u64()?),
+            qty: Qty(r.u64()?),
+            price: Price(r.u64()? as i64),
+        },
+        4 => Command::Cancel {
+            id: OrderId(r.u64()?),
+        },
+        _ => return Err("unknown command tag"),
+    };
+    if !r.buf.is_empty() {
+        return Err("trailing bytes after command");
+    }
+    Ok(cmd)
+}
+
+/// Decode a whole journal. A torn last record is reported in `torn_tail`, not an error;
+/// damage anywhere before the last record is an error (D16).
+pub fn read_journal(bytes: &[u8]) -> Result<Journal, JournalError> {
+    if bytes.len() < HEADER_LEN || &bytes[..4] != MAGIC {
+        return Err(JournalError::BadMagic);
+    }
+    let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+    if version != VERSION {
+        return Err(JournalError::UnsupportedVersion(version));
+    }
+    let mut commands = Vec::new();
+    let mut pos = HEADER_LEN;
+    while pos < bytes.len() {
+        let rest = &bytes[pos..];
+        let torn = Journal {
+            commands: Vec::new(),
+            torn_tail: Some(pos as u64),
+        };
+        if rest.len() < RECORD_HEADER_LEN {
+            return Ok(Journal { commands, ..torn });
+        }
+        let crc = u32::from_le_bytes(rest[..4].try_into().unwrap());
+        let len = u16::from_le_bytes(rest[4..6].try_into().unwrap()) as usize;
+        let end = RECORD_HEADER_LEN + len;
+        if rest.len() < end {
+            // The length may itself be garbage, but either way nothing complete follows.
+            return Ok(Journal { commands, ..torn });
+        }
+        if crc32fast::hash(&rest[4..end]) != crc {
+            if end == rest.len() {
+                return Ok(Journal { commands, ..torn });
+            }
+            return Err(JournalError::Corrupt(pos as u64));
+        }
+        let cmd = decode_command(&rest[RECORD_HEADER_LEN..end]).map_err(|reason| {
+            JournalError::InvalidRecord {
+                offset: pos as u64,
+                reason,
+            }
+        })?;
+        commands.push(cmd);
+        pos += end;
+    }
+    Ok(Journal {
+        commands,
+        torn_tail: None,
+    })
+}
+
+fn side_byte(side: Side) -> u8 {
+    match side {
+        Side::Buy => 0,
+        Side::Sell => 1,
+    }
+}
+
+fn byte_side(b: u8) -> Result<Side, &'static str> {
+    match b {
+        0 => Ok(Side::Buy),
+        1 => Ok(Side::Sell),
+        _ => Err("bad side byte"),
+    }
+}
+
+fn tif_byte(tif: TimeInForce) -> u8 {
+    match tif {
+        TimeInForce::Gtc => 0,
+        TimeInForce::Ioc => 1,
+        TimeInForce::Fok => 2,
+        TimeInForce::PostOnly => 3,
+    }
+}
+
+fn byte_tif(b: u8) -> Result<TimeInForce, &'static str> {
+    match b {
+        0 => Ok(TimeInForce::Gtc),
+        1 => Ok(TimeInForce::Ioc),
+        2 => Ok(TimeInForce::Fok),
+        3 => Ok(TimeInForce::PostOnly),
+        _ => Err("bad time-in-force byte"),
+    }
+}
+
+struct Cursor<'a> {
+    buf: &'a mut [u8; 32],
+    pos: usize,
+}
+
+impl Cursor<'_> {
+    fn u8(&mut self, v: u8) {
+        self.buf[self.pos] = v;
+        self.pos += 1;
+    }
+
+    fn u64(&mut self, v: u64) {
+        self.buf[self.pos..self.pos + 8].copy_from_slice(&v.to_le_bytes());
+        self.pos += 8;
+    }
+}
+
+struct Reader<'a> {
+    buf: &'a [u8],
+}
+
+impl Reader<'_> {
+    fn u8(&mut self) -> Result<u8, &'static str> {
+        let (&b, rest) = self.buf.split_first().ok_or("record too short")?;
+        self.buf = rest;
+        Ok(b)
+    }
+
+    fn u64(&mut self) -> Result<u64, &'static str> {
+        if self.buf.len() < 8 {
+            return Err("record too short");
+        }
+        let (bytes, rest) = self.buf.split_at(8);
+        self.buf = rest;
+        Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample() -> Vec<Command> {
+        [
+            "limit 1 buy 100 10025",
+            "limit 2 sell 7 -40 ioc",
+            "limit 3 sell 7 10030 fok",
+            "limit 4 buy 1 9 post",
+            "market 5 sell 18446744073709551615",
+            "modify 1 50 -9223372036854775808",
+            "cancel 18446744073709551615",
+        ]
+        .iter()
+        .map(|l| l.parse().unwrap())
+        .collect()
+    }
+
+    fn write(cmds: &[Command]) -> Vec<u8> {
+        let mut w = JournalWriter::new(Vec::new()).unwrap();
+        for cmd in cmds {
+            w.append(cmd).unwrap();
+        }
+        w.finish().unwrap()
+    }
+
+    /// Byte offsets where each record starts, plus the end of the file.
+    fn boundaries(bytes: &[u8]) -> Vec<usize> {
+        let mut out = vec![HEADER_LEN];
+        let mut pos = HEADER_LEN;
+        while pos < bytes.len() {
+            let len = u16::from_le_bytes(bytes[pos + 4..pos + 6].try_into().unwrap()) as usize;
+            pos += RECORD_HEADER_LEN + len;
+            out.push(pos);
+        }
+        out
+    }
+
+    #[test]
+    fn round_trips_every_command_kind_and_extreme_values() {
+        let cmds = sample();
+        let journal = read_journal(&write(&cmds)).unwrap();
+        assert_eq!(journal.commands, cmds);
+        assert_eq!(journal.torn_tail, None);
+    }
+
+    #[test]
+    fn payload_sizes_match_the_documented_layout() {
+        let mut buf = [0u8; 32];
+        let sizes: Vec<usize> = sample()
+            .iter()
+            .map(|c| encode_command(c, &mut buf))
+            .collect();
+        assert_eq!(sizes, [27, 27, 27, 27, 18, 25, 9]);
+    }
+
+    #[test]
+    fn empty_journal_is_valid() {
+        assert_eq!(
+            read_journal(&write(&[])).unwrap(),
+            Journal {
+                commands: vec![],
+                torn_tail: None,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_bad_header() {
+        assert_eq!(read_journal(b"LOB"), Err(JournalError::BadMagic));
+        assert_eq!(read_journal(b"XXXX\x01\0\0\0"), Err(JournalError::BadMagic));
+        assert_eq!(
+            read_journal(b"LOBJ\x02\0\0\0"),
+            Err(JournalError::UnsupportedVersion(2))
+        );
+    }
+
+    #[test]
+    fn every_truncation_keeps_the_complete_records() {
+        let cmds = sample();
+        let bytes = write(&cmds);
+        let bounds = boundaries(&bytes);
+        for cut in HEADER_LEN..=bytes.len() {
+            let journal = read_journal(&bytes[..cut]).unwrap();
+            // Records that end at or before the cut survive; a partial one is torn.
+            let complete = bounds.iter().filter(|&&b| b <= cut).count() - 1;
+            assert_eq!(journal.commands, cmds[..complete], "cut at {cut}");
+            let torn = !bounds.contains(&cut);
+            assert_eq!(
+                journal.torn_tail,
+                torn.then_some(bounds[complete] as u64),
+                "cut at {cut}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_flipped_bit_in_the_last_record_is_a_torn_tail() {
+        let cmds = sample();
+        let mut bytes = write(&cmds);
+        let last = *boundaries(&bytes).iter().rev().nth(1).unwrap();
+        *bytes.last_mut().unwrap() ^= 1;
+        let journal = read_journal(&bytes).unwrap();
+        assert_eq!(journal.commands, cmds[..cmds.len() - 1]);
+        assert_eq!(journal.torn_tail, Some(last as u64));
+    }
+
+    #[test]
+    fn a_flipped_bit_before_the_last_record_is_corruption() {
+        let bytes = write(&sample());
+        let bounds = boundaries(&bytes);
+        // Flip every byte of every record except the last, one at a time.
+        for (i, window) in bounds.windows(2).enumerate().take(bounds.len() - 2) {
+            for byte in window[0]..window[1] {
+                let mut damaged = bytes.clone();
+                damaged[byte] ^= 0x10;
+                let result = read_journal(&damaged);
+                let is_len = (window[0] + 4..window[0] + 6).contains(&byte);
+                match result {
+                    Err(JournalError::Corrupt(at)) => assert_eq!(at, window[0] as u64),
+                    // A damaged length can claim the record runs past EOF. That looks
+                    // exactly like a torn write, so it's the one case reported as torn.
+                    Ok(journal) if is_len => {
+                        assert_eq!(journal.torn_tail, Some(window[0] as u64));
+                        assert_eq!(journal.commands.len(), i);
+                    }
+                    other => panic!("record {i} byte {byte}: {other:?}"),
+                }
+            }
+        }
+    }
+
+    /// A record with a correct CRC around an arbitrary payload.
+    fn raw_record(payload: &[u8]) -> Vec<u8> {
+        let len = (payload.len() as u16).to_le_bytes();
+        let mut crc = crc32fast::Hasher::new();
+        crc.update(&len);
+        crc.update(payload);
+        let mut bytes = write(&[]);
+        bytes.extend_from_slice(&crc.finalize().to_le_bytes());
+        bytes.extend_from_slice(&len);
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
+    #[test]
+    fn a_valid_checksum_over_a_bad_payload_is_invalid() {
+        let invalid = |payload: &[u8]| match read_journal(&raw_record(payload)) {
+            Err(JournalError::InvalidRecord { offset: 8, reason }) => reason,
+            other => panic!("{payload:?}: {other:?}"),
+        };
+        assert_eq!(invalid(&[9, 0, 0]), "unknown command tag");
+        assert_eq!(invalid(&[4, 1, 0, 0]), "record too short");
+        // A cancel with one byte too many.
+        assert_eq!(
+            invalid(&[4, 1, 0, 0, 0, 0, 0, 0, 0, 7]),
+            "trailing bytes after command"
+        );
+        // A limit with side byte 2.
+        let mut limit = [0u8; 27];
+        limit[0] = 1;
+        limit[9] = 2;
+        assert_eq!(invalid(&limit), "bad side byte");
+        limit[9] = 0;
+        limit[26] = 4;
+        assert_eq!(invalid(&limit), "bad time-in-force byte");
+    }
+}

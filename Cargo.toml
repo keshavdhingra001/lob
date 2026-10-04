@@ -6,4 +6,10 @@ description = "A price-time priority limit order book and matching engine with d
 license = "MIT"
 
 [dependencies]
+crc32fast = "1"
 thiserror = "2"
+
+# Tests replay hundreds of thousands of commands with O(book) checks after each one;
+# unoptimized builds made that ~30 s. Level 1 keeps debug info and overflow checks.
+[profile.dev]
+opt-level = 1

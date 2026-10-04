@@ -5,8 +5,11 @@
 pub mod book;
 pub mod command;
 pub mod error;
+pub mod gen;
+pub mod journal;
 pub mod ledger;
 pub mod reference;
+pub mod replay;
 pub mod rng;
 pub mod scenario;
 pub mod types;

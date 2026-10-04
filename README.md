@@ -29,6 +29,20 @@ bid 10050 50 (1)
 Prices are integer ticks (`10025` is $100.25 with a one-cent tick). A trade line reads
 `trade <taker> <maker> <taker side> <qty> <price>`.
 
+Record synthetic order flow and replay it deterministically:
+
+```bash
+cargo run --release -- gen 1 20000 flow.jrnl
+cargo run --release -- replay flow.jrnl events.bin
+```
+
+```
+commands 20000  events 28834  trades 8316  rejects 5519
+digest   f0cd0c4be21b0c27
+```
+
+The digest is the same on every run and every machine. It's pinned in the tests.
+
 ## What's built so far
 
 - **Reference book**: price-time priority matching for limit, market and cancel. Every trade
@@ -43,6 +57,11 @@ Prices are integer ticks (`10025` is $100.25 with a one-cent tick). A trade line
 - **Conservation ledger**: an outside check that rebuilds every order's open quantity from the
   event stream alone and matches it against the book after each command, over thousands of
   random sessions.
+- **Deterministic replay**: a checksummed binary command journal (torn tails tolerated,
+  mid-file damage refused) and a sequence-numbered binary event stream with a 64-bit digest.
+  Replays are byte-identical.
+- **Synthetic order flow**: a seeded generator with a random-walk mid, queues building at the
+  touch, and frequent cancels and modifies.
 - **Command and event model** with a text format whose parser and printer round-trip.
 
 ## Planned headline results
