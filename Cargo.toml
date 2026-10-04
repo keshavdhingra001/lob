@@ -1,0 +1,9 @@
+[package]
+name = "lob"
+version = "0.1.0"
+edition = "2021"
+description = "A price-time priority limit order book and matching engine with deterministic replay"
+license = "MIT"
+
+[dependencies]
+thiserror = "2"
