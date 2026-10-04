@@ -282,6 +282,12 @@ impl Ladder {
                 return;
             }
             next = self.highest_below(Some(price));
+            // Each step must move strictly down. A search bug that returned the same level
+            // again would otherwise loop forever (and `depth` would grow its Vec without bound).
+            debug_assert!(
+                next.is_none_or(|(p, _)| p < price),
+                "no progress at {price}"
+            );
         }
     }
 
@@ -293,6 +299,10 @@ impl Ladder {
                 return;
             }
             next = self.lowest_above(Some(price));
+            debug_assert!(
+                next.is_none_or(|(p, _)| p > price),
+                "no progress at {price}"
+            );
         }
     }
 
