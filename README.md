@@ -45,6 +45,9 @@ The digest is the same on every run and every machine. It's pinned in the tests.
 
 ## What's built so far
 
+- **Fast book**: a slab of orders with an intrusive doubly linked list per price level, O(1)
+  cancel by id, and a cached best level. It produces identical events to the reference book over
+  15 million differential-tested commands.
 - **Reference book**: price-time priority matching for limit, market and cancel. Every trade
   happens at the resting order's price. It's built to be obviously correct, and it's the oracle
   the fast book (M4) is tested against.
@@ -64,8 +67,21 @@ The digest is the same on every run and every machine. It's pinned in the tests.
   touch, and frequent cancels and modifies.
 - **Command and event model** with a text format whose parser and printer round-trip.
 
-## Planned headline results
+## Results so far
 
-- Byte-identical replay of millions of generated orders and a real NASDAQ ITCH session.
-- Differential testing of the fast book against a simple reference book.
+Throughput on one core (`lob bench`, release, best of 5, matching only):
+
+| Workload | Reference book | Fast book | Speedup |
+|---|---|---|---|
+| Generated order flow, 2M commands | 13.6 M/s | 16.1 M/s | 1.19x |
+| One queue of 50,000 orders, cancelled in random order | 0.30 M/s | 15.2 M/s | 51x |
+
+On realistic flow both books spend most of their time on the same costs (hashing, the price tree,
+emitting events). The fast book's structure guarantees cancels cost the same however deep a
+queue gets. Details are in [DESIGN.md](DESIGN.md) (D22).
+
+## Planned
+
 - p50 / p99 / p99.9 latency per operation, with zero allocations on the hot path.
+- Replay of a real NASDAQ ITCH session.
+- A lock-free pipeline between gateway, matching and market data threads.

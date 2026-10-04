@@ -204,6 +204,33 @@ impl Iterator for Generator {
     }
 }
 
+/// Worst case for the reference book's cancel (D22): `n` buys queued at one price, then
+/// cancelled in a seeded random order. Each reference cancel scans the queue (O(n)), so
+/// the whole session is O(n²) there and O(n) in the fast book.
+pub fn deep_queue(n: u64, seed: u64) -> Vec<Command> {
+    let mut rng = Rng::new(seed);
+    let mut ids: Vec<u64> = (1..=n).collect();
+    let mut cmds: Vec<Command> = ids
+        .iter()
+        .map(|&id| Command::Limit {
+            id: OrderId(id),
+            side: Side::Buy,
+            qty: Qty(1),
+            price: Price(10_000),
+            tif: TimeInForce::Gtc,
+        })
+        .collect();
+    // Fisher-Yates shuffle, so cancels hit the front, middle and back of the queue.
+    for i in (1..ids.len()).rev() {
+        ids.swap(i, rng.below(i as u64 + 1) as usize);
+    }
+    cmds.extend(
+        ids.into_iter()
+            .map(|id| Command::Cancel { id: OrderId(id) }),
+    );
+    cmds
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,6 +266,22 @@ mod tests {
         assert!((2..=6).contains(&pct[1]), "{pct:?}");
         assert!((7..=13).contains(&pct[2]), "{pct:?}");
         assert!((25..=35).contains(&pct[3]), "{pct:?}");
+    }
+
+    #[test]
+    fn deep_queue_adds_then_cancels_everything_once() {
+        let cmds = deep_queue(100, 3);
+        assert_eq!(cmds.len(), 200);
+        let mut cancelled: Vec<u64> = cmds[100..]
+            .iter()
+            .map(|c| match c {
+                Command::Cancel { id } => id.0,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_ne!(cancelled, (1..=100).collect::<Vec<_>>(), "not shuffled");
+        cancelled.sort();
+        assert_eq!(cancelled, (1..=100).collect::<Vec<_>>());
     }
 
     #[test]

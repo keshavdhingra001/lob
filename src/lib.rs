@@ -5,6 +5,7 @@
 pub mod book;
 pub mod command;
 pub mod error;
+pub mod fast;
 pub mod gen;
 pub mod journal;
 pub mod ledger;
@@ -17,5 +18,6 @@ pub mod types;
 pub use book::{BookConfig, Level, OrderBook};
 pub use command::{Command, Event, RejectReason, TimeInForce};
 pub use error::ParseError;
+pub use fast::FastBook;
 pub use reference::RefBook;
 pub use types::{OrderId, Price, Qty, Side};

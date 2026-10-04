@@ -11,11 +11,12 @@ clients ──> gateway thread ──SPSC ring──> matching thread ──SPSC
                                            pure, deterministic             command journal (replay)
 ```
 
-Today (M3): the reference book (D8) behind the `OrderBook` trait, matching by D9 with modify
+Today (M4, Tier 1 complete): two books behind the `OrderBook` trait: the reference book (D8) behind the `OrderBook` trait, matching by D9 with modify
 (D11), IOC/FOK/post-only (D12) and instrument rules (D14). Checked by scenario scripts, an
 invariant checker (D10) and an event-only conservation ledger over random sessions (D13).
 Input is recorded in a binary journal (D15, D16); replay produces a sequenced event stream and a
-digest (D17). A seeded generator (D18) supplies realistic order flow.
+digest (D17). A seeded generator (D18) supplies realistic order flow. The fast book (D19–D21)
+produces identical events, proven by differential testing over 15M commands (D22).
 
 ## Decisions
 
@@ -252,3 +253,71 @@ digest (D17). A seeded generator (D18) supplies realistic order flow.
 ### Build profile
 - `[profile.dev] opt-level = 1`: the randomized and replay tests run O(book) checks after every
   command. Unoptimized, the suite took about 30 s; now it's about 2 s. Debug info and overflow checks stay on.
+
+### D19: Slab storage for orders and levels (M4)
+- **What:** `Slab<T>` is a `Vec<T>` plus a free list of indices. Orders and price levels live in
+  slabs and refer to each other by `u32` index. A removed slot is reused by the next insert.
+- **Why:**
+  - Once the book is warm, resting an order reuses a slot instead of allocating. M6 will prove zero
+    allocations per command with a counting allocator.
+  - Nodes are contiguous, so walking a queue touches nearby memory more often than `Box`ed nodes scattered over the heap.
+  - `u32` indices are half the size of pointers and need no `unsafe`.
+- **Cost:** a stale index after removal would silently point at a reused slot (the slab
+  version of use-after-free). `check_invariants` walks every list and checks back links, level
+  ownership, the index and the slab's live count, and the differential test runs it constantly.
+  A generation counter per slot is the standard fix if this ever bites.
+
+### D20: Intrusive doubly linked list per level, with aggregates
+- **What:** each order node holds `prev`/`next` slot indices. Each level holds head, tail, total
+  quantity and order count.
+- **Why:** O(1) append at the tail, O(1) fill from the head, and O(1) removal from anywhere given
+  the slot. The reference book's `VecDeque` needs O(n) to remove from the middle.
+  `total` makes depth queries and the FOK pre-scan walk levels instead of orders.
+- **Subtlety:** when a fill takes a maker to zero, the fill has already come out of the level
+  total, so `unlink` (which subtracts the node's remaining quantity, now 0) doesn't subtract it
+  twice. A mutation dropping either subtraction was caught.
+
+### D21: Id index and best-level cache
+- **What:** `HashMap<OrderId, slot>` for cancel and modify. `best: [u32; 2]` caches each side's best
+  level. It's updated when a better level is created, and recomputed from the price tree only
+  when the best level empties.
+- **Why:** matching asks "what's the best level?" for every level it sweeps. The cache makes that
+  a load instead of a tree search. The tree stays the source of truth (a tick-indexed array is M6).
+- **Determinism:** `HashMap` uses a random hash seed per process, but the engine only looks up
+  and removes by key and never iterates it, so output can't depend on the seed (D4).
+
+### D22: Differential testing and measured results (M4)
+- **Proof of equivalence:** the fast book must produce *identical events* to the reference book
+  for every command:
+  - all 11 scenario files, run against both books
+  - 5 generated sessions × 40,000 commands, with depth, both books' invariants and the ledger checked every 10 commands
+  - 30 edge-case sessions × 10,000 commands, checked after every command
+  - a 3,000-order deep-queue worst case
+  - **Release run** (`cargo test --release --test differential -- --ignored`): 10 generated sessions
+    × 1M plus 10 edge-case sessions × 500k, 15M commands in total, all identical (49 s).
+  - It matched on the first run, after the code was written against the reference.
+- **Mutation-checked:** 12 planted bugs, all caught:
+  - a stale best cache, or the best-level comparison inverted
+  - level totals not maintained on fill, rest, or an in-place modify
+  - FOK summing order counts instead of quantity
+  - filled orders left in the index, or the post-only flag lost on a modify
+  - no slot reuse, or a modify that always keeps priority
+  - broken tail or prev links
+- **Throughput** (`lob bench`, release, best of 5, one core; "apply" excludes event encoding and hashing):
+
+  | Workload | Reference | Fast | Speedup |
+  |---|---|---|---|
+  | Generated flow, 2M commands (~1,700 resting) | 13.6 M/s | 16.1 M/s | 1.19x |
+  | Generated, deeper (max-live 200k, ~17,000 resting) | 13.0 M/s | 14.3 M/s | 1.11x |
+  | One queue of 1,000 orders, random cancels | 7.8 M/s | 15.7 M/s | 2.0x |
+  | One queue of 10,000 | 1.5 M/s | 18.6 M/s | 12x |
+  | One queue of 50,000 | 0.30 M/s | 15.2 M/s | **51x** |
+
+- **Reading the numbers honestly:**
+  - On realistic flow, prices spread over many short levels, so the reference book's O(level) scan
+    is cheap, and both books spend most of their time on the same things: two SipHash lookups per
+    order (`used` and the index), the `BTreeMap` price tree, and pushing events.
+  - The fast book's structure buys a *bound*: cancel costs the same however deep the queue, while
+    the reference book degrades quadratically. Tail latency (M5) is where that shows on real flow.
+  - The next speedups are the shared costs: a cheaper hasher or dense ids, a tick-indexed ladder
+    instead of the tree, and no allocation (M6). The numbers above are the baseline that work is measured against.

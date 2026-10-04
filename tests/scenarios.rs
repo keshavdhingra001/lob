@@ -4,7 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use lob::scenario::{first_difference, transcript};
-use lob::RefBook;
+use lob::{FastBook, OrderBook, RefBook};
 
 fn scenario_files() -> Vec<PathBuf> {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/scenarios");
@@ -18,13 +18,12 @@ fn scenario_files() -> Vec<PathBuf> {
     files
 }
 
-#[test]
-fn reference_book_passes_every_scenario() {
+fn run_all<B: OrderBook>() {
     let mut failures = Vec::new();
     for path in scenario_files() {
         let script = fs::read_to_string(&path).unwrap();
         let name = path.file_name().unwrap().to_string_lossy();
-        match transcript::<RefBook>(&script) {
+        match transcript::<B>(&script) {
             Ok(actual) => {
                 if let Some(diff) = first_difference(&script, &actual) {
                     failures.push(format!("{name}: {diff}"));
@@ -34,4 +33,14 @@ fn reference_book_passes_every_scenario() {
         }
     }
     assert!(failures.is_empty(), "\n{}", failures.join("\n\n"));
+}
+
+#[test]
+fn reference_book_passes_every_scenario() {
+    run_all::<RefBook>();
+}
+
+#[test]
+fn fast_book_passes_every_scenario() {
+    run_all::<FastBook>();
 }

@@ -2,65 +2,12 @@
 //! conservation ledger after every command. Narrow prices and small quantities make
 //! crossing, partial fills, sweeps and FOK edge cases common.
 
-use lob::command::TimeInForce;
+mod common;
+
+use common::random_command;
 use lob::ledger::Ledger;
 use lob::rng::Rng;
-use lob::{BookConfig, Command, OrderBook, OrderId, Price, Qty, RefBook, Side};
-
-/// Mostly a fresh id, sometimes an old one (to hit duplicate-id rejects).
-fn new_order_id(rng: &mut Rng, next_id: &mut u64) -> OrderId {
-    if *next_id > 1 && rng.chance(10) {
-        OrderId(1 + rng.below(*next_id - 1))
-    } else {
-        *next_id += 1;
-        OrderId(*next_id - 1)
-    }
-}
-
-fn random_command(rng: &mut Rng, next_id: &mut u64, tick: i64) -> Command {
-    let side = if rng.chance(50) {
-        Side::Buy
-    } else {
-        Side::Sell
-    };
-    // Some quantities are 0 or above the max (12), some prices off the tick grid.
-    let qty = Qty(rng.below(14));
-    let price = Price(if rng.chance(5) {
-        rng.range(90, 110)
-    } else {
-        rng.range(95, 105) * tick
-    });
-    match rng.below(100) {
-        0..=44 => {
-            let tif = match rng.below(10) {
-                0 => TimeInForce::Ioc,
-                1 => TimeInForce::Fok,
-                2 => TimeInForce::PostOnly,
-                _ => TimeInForce::Gtc,
-            };
-            Command::Limit {
-                id: new_order_id(rng, next_id),
-                side,
-                qty,
-                price,
-                tif,
-            }
-        }
-        45..=54 => Command::Market {
-            id: new_order_id(rng, next_id),
-            side,
-            qty,
-        },
-        55..=74 => Command::Modify {
-            id: OrderId(1 + rng.below(*next_id)),
-            qty,
-            price,
-        },
-        _ => Command::Cancel {
-            id: OrderId(1 + rng.below(*next_id)),
-        },
-    }
-}
+use lob::{BookConfig, OrderBook, RefBook};
 
 fn run(seed: u64, commands: usize, tick: i64) {
     let mut rng = Rng::new(seed);
