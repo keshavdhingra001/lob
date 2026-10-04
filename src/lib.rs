@@ -8,6 +8,7 @@ pub mod error;
 pub mod fast;
 pub mod gen;
 pub mod journal;
+pub mod latency;
 pub mod ledger;
 pub mod reference;
 pub mod replay;

@@ -6,6 +6,7 @@
 //! lob replay <journal> [events-file]    replay a journal; print stats and the digest
 //! lob bench <journal>                   replay through both books; compare speed and digests
 //! lob gen-queue <orders> <journal>      worst case: one deep queue, cancelled in random order
+//! lob latency <journal> [runs]          per-command latency percentiles for both books
 //! ```
 
 use std::fs::{self, File};
@@ -14,6 +15,7 @@ use std::process::ExitCode;
 
 use lob::gen::{GenConfig, Generator};
 use lob::journal::{read_journal, JournalWriter};
+use lob::latency::{measure_runs, median_run, table};
 use lob::replay::{replay, replay_timed};
 use lob::scenario::run_line;
 use lob::{Command, FastBook, OrderBook, RefBook};
@@ -35,7 +37,9 @@ usage:
                                         (max-live: orders the generator keeps alive, default 5000)
   lob replay <journal> [events-file]    replay a journal, print stats and digest
   lob bench <journal>                   replay through both books, compare speed and digests
-  lob gen-queue <orders> <journal>      worst case for cancel: one deep queue, random cancels";
+  lob gen-queue <orders> <journal>      worst case for cancel: one deep queue, random cancels
+  lob latency <journal> [runs]          per-command latency percentiles, both books
+                                        (runs: default 5; pin it with `taskset -c <cpu>`)";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -48,6 +52,8 @@ fn main() -> ExitCode {
         ["replay", path, events] => replay_file(path, Some(events)),
         ["bench", path] => bench(path),
         ["gen-queue", n, path] => gen_queue(n, path),
+        ["latency", path] => latency(path, "5"),
+        ["latency", path, runs] => latency(path, runs),
         _ => Err(USAGE.to_string()),
     };
     match result {
@@ -192,6 +198,70 @@ fn bench(path: &str) -> Result<(), String> {
         return Err("digests differ: the books disagree".to_string());
     }
     Ok(())
+}
+
+/// Per-command latency for both books (D23–D27): a warm-up pass, then `runs` timed runs
+/// on fresh books, reporting the run with the median overall p99.
+fn latency(path: &str, runs: &str) -> Result<(), String> {
+    let runs: usize = match runs.parse() {
+        Ok(n) if n > 0 => n,
+        _ => return Err(format!("bad run count `{runs}`")),
+    };
+    let bytes = fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+    let journal = read_journal(&bytes).map_err(|e| format!("{path}: {e}"))?;
+    let commands = &journal.commands;
+    print!("{}", machine());
+    println!(
+        "{} commands from {path}; warm-up, then {runs} runs per book; showing the run with the median p99\n",
+        commands.len()
+    );
+    fn report<B: OrderBook>(name: &str, commands: &[Command], runs: usize) {
+        let reports = measure_runs::<B>(commands, runs);
+        let p99s: Vec<String> = reports
+            .iter()
+            .map(|r| r.all.value_at_quantile(0.99).to_string())
+            .collect();
+        println!("{name} (overall p99 per run: {} ns)", p99s.join(" "));
+        println!("{}\n", table(median_run(&reports)));
+    }
+    report::<RefBook>("reference", commands, runs);
+    report::<FastBook>("fast", commands, runs);
+    Ok(())
+}
+
+/// What the numbers were measured on (D27). Linux-only files; missing ones print "?".
+fn machine() -> String {
+    let read = |p: &str| fs::read_to_string(p).map(|s| s.trim().to_string());
+    let cpu = read("/proc/cpuinfo")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("model name"))
+                .and_then(|l| l.split(':').nth(1))
+                .map(|m| m.trim().to_string())
+        })
+        .unwrap_or_else(|| "?".into());
+    let pinned = read("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("Cpus_allowed_list"))
+                .and_then(|l| l.split(':').nth(1))
+                .map(|m| m.trim().to_string())
+        })
+        .unwrap_or_else(|| "?".into());
+    let or_q = |r: io::Result<String>| r.unwrap_or_else(|_| "?".into());
+    let governor = or_q(read(
+        "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor",
+    ));
+    let epp = or_q(read(
+        "/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference",
+    ));
+    let no_turbo = or_q(read("/sys/devices/system/cpu/intel_pstate/no_turbo"));
+    format!(
+        "cpu      {cpu}\nkernel   {}\ngovernor {governor} (epp {epp}, no_turbo {no_turbo})\ncpus     {pinned} (the cpus this process may run on)\n",
+        or_q(read("/proc/sys/kernel/osrelease"))
+    )
 }
 
 fn repl() -> io::Result<()> {

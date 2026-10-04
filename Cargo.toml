@@ -7,9 +7,13 @@ license = "MIT"
 
 [dependencies]
 crc32fast = "1"
+hdrhistogram = { version = "7.6", default-features = false }
 thiserror = "2"
 
 # Tests replay hundreds of thousands of commands with O(book) checks after each one;
 # unoptimized builds made that ~30 s. Level 1 keeps debug info and overflow checks.
 [profile.dev]
 opt-level = 1
+
+[dev-dependencies]
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
