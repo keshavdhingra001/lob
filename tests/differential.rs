@@ -46,6 +46,15 @@ fn compare(
                         "{side} depth differs\n  reference: {r:?}\n  fast:      {f:?}"
                     ));
                 }
+                // A limited query too: the top 3 levels, and none at all.
+                for n in [0, 3] {
+                    let (r, f) = (reference.depth(side, n), fast.depth(side, n));
+                    if r != f {
+                        fail(format!(
+                            "{side} depth({n}) differs\n  reference: {r:?}\n  fast:      {f:?}"
+                        ));
+                    }
+                }
             }
             fast.check_invariants().unwrap_or_else(fail);
             reference.check_invariants().unwrap_or_else(fail);
