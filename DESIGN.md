@@ -946,5 +946,5 @@ Fixes, not done: move items in batches (one index store per command, not per eve
   preemption and timer interrupts on cores that aren't isolated (`isolcpus`/`nohz_full` were not used). Because stamps are scheduled times, a stall is charged to every command queued behind it.
 - **3 M/s is close to the 3.8 M/s capacity.** Run 3 shows what happens near saturation: one stall left a backlog the pipeline drains
   only slowly, and p99 jumped from about 0.1 ms to 2.8 ms. With actual-send stamps, this run would have looked almost as good as the others.
-- **Mutation checks:** 12 planted bugs in `ring.rs` and `pipeline.rs`. Weakening `Acquire`/`Release` to `Relaxed` (2 mutants) survives, as D45
+- **Mutation checks:** 11 planted bugs in `ring.rs` and `pipeline.rs`. Weakening `Acquire`/`Release` to `Relaxed` (2 mutants) survives, as D45
   predicts. The final re-check in `pop` survived until a stress test of 20,000 one-item hand-offs was added, which now catches it 3 runs out of 3.
