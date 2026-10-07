@@ -662,6 +662,31 @@ vs 44 / 61 / 144 for the fast book (58x at p99).
    instead of a tree lookup for the level.
 4. **The changes aren't measured one at a time.** This A/B compares M5 with all of D30, D31 and D33. The profile shows where
    the time went (the used set gone, SipHash replaced, the tree gone), but not each change's share. Building one binary per decision would give that.
-5. **Criterion wasn't re-run for M6** (the session ended during it). That's still to do: `taskset -c 2 cargo bench --bench book` on a quiet machine.
+5. **Criterion agrees** (table below): the fast book's add is 3–4x cheaper than in M5 at every depth, because the used-id set is gone.
+   The reference book's add halved for the same reason, since it gained D30 as well. That resolves D28's caveat.
 6. **The id index is now the biggest single matching cost** (21% for insert plus remove). With increasing ids (D30) a
    direct-mapped table would fit, if ids were dense. Real client ids have gaps, so that's a Tier 3 gateway question.
+
+**Criterion, M6** (2026-10-07, `taskset -c 2 cargo bench --bench book -- --warm-up-time 1 --measurement-time 3`, mean ns per op,
+min–max over the 2 runs that were quiet before and after: idle 93%/84% and 94%/96%). Two more runs overlapped another session's
+GPU profiler (idle fell to 52%), pushed both books up 1.5–2x, and are left out. M5 columns are copied from D28's table, which
+had noisy runs, so M5 vs M6 here is a rough guide; the alternated latency A/B above is the careful comparison.
+
+| Op @ depth | Ref M5 | Ref M6 | Fast M5 | Fast M6 |
+|---|---|---|---|---|
+| add @ 10 | 82–102 | 41–44 | 94–97 | **24–25** |
+| add @ 1k | | 56–80 | | 25–28 |
+| add @ 100k | 141–231 | 81–86 | 114–126 | **34–37** |
+| cancel @ 10 | 55–119 | 56–60 | 41–54 | 30 |
+| cancel @ 1k | 72–87 | 74–128 | 27–61 | 22–24 |
+| cancel @ 100k | 487–703 | 437–477 | 67–136 | **39–98** |
+| match @ 10 | 90–173 | 38 | 87–99 | 35–38 |
+| match @ 1k | | 33–34 | | 29–30 |
+| match @ 100k | 90–247 | 37–39 | 85–97 | 36–61 |
+
+- **Add no longer grows with depth much** (fast 24 to 37 ns from 10 to 100k orders): no used-id set, and a ladder slot instead of a tree search.
+- **Cancel at 100k is still 4.5–11x faster than the reference book**, D22's O(1) vs O(level).
+- **Fast cancel and match at 100k vary 2x between clean runs** (39 vs 98, 36 vs 61), and nothing else does. A guess, not
+  measured: at 100k orders the slab (3.2 MB of 32-byte nodes) and index outgrow L2, so the result depends on where pages land.
+  `perf stat` on L2/LLC misses for just that bench would settle it.
+- Match costs about the same in both books at 10 and 1k orders (within 10%); crossing one maker is mostly shared work.
