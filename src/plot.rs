@@ -83,12 +83,10 @@ pub fn parse_hgrm(text: &str) -> Result<Vec<Point>, String> {
 
 /// The x of a point, in decades of `1/(1-q)`: 0 at p0, 2 at p99, 3 at p99.9. A sample
 /// set of n can't resolve past `1/(1-q) = n`, and the last line (q = 1, the max) has an
-/// infinite `1/(1-q)`, so both are placed at `log10(n)`.
+/// infinite `1/(1-q)`, so both are placed at `log10(n)`: `log10(0)` is -inf, and
+/// `min` turns the resulting +inf into the limit.
 pub fn decades(p: &Point, samples: u64) -> f64 {
     let limit = (samples.max(1) as f64).log10();
-    if p.quantile >= 1.0 {
-        return limit;
-    }
     (-(1.0 - p.quantile).log10()).min(limit)
 }
 
@@ -265,6 +263,16 @@ mod tests {
         for p in &points {
             assert_eq!(p.total, h.count_between(0, p.value), "{p:?}");
         }
+        // HdrHistogram's layout: 4 columns, except the last line (percentile 1.0) has 3.
+        let rows: Vec<usize> = hgrm(&h)
+            .lines()
+            .skip(2)
+            .filter(|l| !l.starts_with('#'))
+            .map(|l| l.split_whitespace().count())
+            .collect();
+        assert_eq!(rows.len(), points.len());
+        assert!(rows[..rows.len() - 1].iter().all(|&n| n == 4));
+        assert_eq!(rows.last(), Some(&3));
         // And the median line holds the median.
         let median = points.iter().find(|p| p.quantile >= 0.5).unwrap();
         assert_eq!(median.value, h.value_at_quantile(0.5));
@@ -395,6 +403,23 @@ mod tests {
         assert!(!out.contains(">99.99%<") && !out.contains(">100 µs<"));
         // Legend entries.
         assert!(out.contains(">ref</text>") && out.contains(">fast</text>"));
+    }
+
+    #[test]
+    fn axes_round_out_to_whole_decades() {
+        // 1500 samples need 3.2 decades of x: the axis goes to 4 (99.99%), not 3.
+        // Values 15..=150 ns: the y axis goes from 10 ns to 1 µs.
+        let pts = [point(15, 0.0, 1), point(150, 1.0, 1500)];
+        let out = svg("t", &[("a", &pts)]);
+        for label in [">99.99%<", ">10 ns<", ">100 ns<", ">1 µs<"] {
+            assert!(out.contains(label), "{label}");
+        }
+        assert!(!out.contains(">99.999%<") && !out.contains(">10 µs<"));
+        // Every value in one decade, even a single value: still a 1-decade y axis.
+        let flat = [point(100, 0.0, 1), point(100, 1.0, 10)];
+        let out = svg("t", &[("a", &flat)]);
+        assert!(out.contains(">100 ns<") && out.contains(">1 µs<"));
+        assert!(!out.contains("NaN") && !out.contains("inf"));
     }
 
     #[test]
