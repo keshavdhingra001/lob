@@ -6,7 +6,8 @@
 //! lob replay <journal> [events-file]    replay a journal; print stats and the digest
 //! lob bench <journal>                   replay through both books; compare speed and digests
 //! lob gen-queue <orders> <journal>      worst case: one deep queue, cancelled in random order
-//! lob latency <journal> [runs]          per-command latency percentiles for both books
+//! lob latency <journal> [runs] [dir]    per-command latency percentiles for both books
+//! lob plot <out.svg> <title> <label=file.hgrm>...   percentile plot of latency histograms (D60)
 //! lob run <ref|fast|none> <journal> [repeats]   apply only, no timing: for `perf stat` (D29)
 //! lob feed <journal> [drop-percent] [seed]   publish market data; recover over a lossy link (D40–D44)
 //! lob pipeline <journal> [rate] [ring|mpsc] [capacity]   three threads vs one (D45–D48)
@@ -23,6 +24,7 @@ use lob::book::apply_all;
 use lob::gen::{GenConfig, Generator};
 use lob::journal::{read_journal, Journal, JournalWriter};
 use lob::latency::{measure_interleaved, median_run, table, Report};
+use lob::plot::{hgrm, parse_hgrm, svg};
 use lob::replay::{replay, replay_timed};
 use lob::scenario::run_line;
 use lob::{Command, FastBook, OrderBook, RefBook};
@@ -45,8 +47,11 @@ usage:
   lob replay <journal> [events-file]    replay a journal, print stats and digest
   lob bench <journal>                   replay through both books, compare speed and digests
   lob gen-queue <orders> <journal>      worst case for cancel: one deep queue, random cancels
-  lob latency <journal> [runs]          per-command latency percentiles, both books
-                                        (runs: default 5; pin it with `taskset -c <cpu>`)
+  lob latency <journal> [runs] [dir]    per-command latency percentiles, both books
+                                        (runs: default 5; pin it with `taskset -c <cpu>`); with
+                                        dir, also write ref.hgrm, fast.hgrm and clock.hgrm there
+  lob plot <out.svg> <title> <label=file.hgrm>...   draw up to 4 .hgrm files as a log-log
+                                        percentile plot
   lob run <ref|fast|none> <journal> [repeats]   apply only, nothing timed or printed per command,
                                         for `perf stat`; `none` only decodes (the baseline)
   lob feed <journal> [drop-percent] [seed]   publish the journal's market data: messages, bytes,
@@ -78,8 +83,10 @@ fn main() -> ExitCode {
         ["gen-queue", n, path] => gen_queue(n, path),
         ["run", book, path] => run(book, path, "1"),
         ["run", book, path, repeats] => run(book, path, repeats),
-        ["latency", path] => latency(path, "5"),
-        ["latency", path, runs] => latency(path, runs),
+        ["latency", path] => latency(path, "5", None),
+        ["latency", path, runs] => latency(path, runs, None),
+        ["latency", path, runs, dir] => latency(path, runs, Some(dir)),
+        ["plot", out, title, ref series @ ..] if !series.is_empty() => plot(out, title, series),
         ["feed", path] => feed(path, "1", "1"),
         ["feed", path, drop] => feed(path, drop, "1"),
         ["feed", path, drop, seed] => feed(path, drop, seed),
@@ -243,7 +250,8 @@ fn bench(path: &str) -> Result<(), String> {
 
 /// Per-command latency for both books (D23–D27): a warm-up pass per book, then `runs`
 /// timed runs per book on fresh books, alternating, reporting the run with the median p99.
-fn latency(path: &str, runs: &str) -> Result<(), String> {
+/// With `dir`, the median runs' whole histograms go there as `.hgrm` files (D60).
+fn latency(path: &str, runs: &str, dir: Option<&str>) -> Result<(), String> {
     let runs: usize = match runs.parse() {
         Ok(n) if n > 0 => n,
         _ => return Err(format!("bad run count `{runs}`")),
@@ -274,7 +282,40 @@ fn latency(path: &str, runs: &str) -> Result<(), String> {
     let (reference, fast) = measure_interleaved::<RefBook, FastBook>(commands, runs);
     report("reference", &reference);
     report("fast", &fast);
+    if let Some(dir) = dir {
+        let (reference, fast) = (median_run(&reference), median_run(&fast));
+        fs::create_dir_all(dir).map_err(|e| format!("{dir}: {e}"))?;
+        for (name, h) in [
+            ("ref", &reference.all),
+            ("fast", &fast.all),
+            ("clock", &fast.clock),
+        ] {
+            let file = format!("{dir}/{name}.hgrm");
+            fs::write(&file, hgrm(h)).map_err(|e| format!("{file}: {e}"))?;
+        }
+        println!("histograms written to {dir}/{{ref,fast,clock}}.hgrm");
+    }
     Ok(())
+}
+
+/// Draw `.hgrm` files, each given as `label=file`, as one percentile plot (D60).
+fn plot(out: &str, title: &str, series: &[&str]) -> Result<(), String> {
+    if series.len() > 4 {
+        return Err("at most 4 series".to_string());
+    }
+    let mut loaded = Vec::new();
+    for arg in series {
+        let (label, file) = arg
+            .split_once('=')
+            .ok_or_else(|| format!("`{arg}`: expected label=file.hgrm"))?;
+        let text = fs::read_to_string(file).map_err(|e| format!("{file}: {e}"))?;
+        loaded.push((
+            label,
+            parse_hgrm(&text).map_err(|e| format!("{file}: {e}"))?,
+        ));
+    }
+    let series: Vec<(&str, &[_])> = loaded.iter().map(|(l, p)| (*l, p.as_slice())).collect();
+    fs::write(out, svg(title, &series)).map_err(|e| format!("{out}: {e}"))
 }
 
 /// Apply a journal `repeats` times, each on a fresh book, with nothing else in the loop,

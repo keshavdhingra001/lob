@@ -18,6 +18,7 @@ pub mod ladder;
 pub mod latency;
 pub mod ledger;
 pub mod pipeline;
+pub mod plot;
 pub mod reference;
 pub mod replay;
 pub mod ring;

@@ -1070,3 +1070,32 @@ All numbers are in [BENCHMARKS.md](BENCHMARKS.md), with the raw output in `bench
   - Two latency parts ran with clock floors of 15–21 ns. The script can now redo single parts (`OUT=... ONLY=...`), appending to the same file so both runs stay on record.
 - **Translator tests:** 9 tests, including random flow checked against a model of NASDAQ's book. With executions at the queue head, our book equals NASDAQ's after every message.
   With executions anywhere at the touch, every order live in ours is live in NASDAQ's, and both end empty. 13 planted bugs, all caught.
+
+### D58: DESIGN.md keeps its decision log (M12)
+- **What:** the D-numbered log stays in the order the decisions were made. An as-built overview and an index of decisions by topic go at the top.
+- **Alternatives:** rewrite it by topic, as if designed in one go (loses why things changed, e.g. D7 → D46, D42's snapshots → M11's 1.14 GB);
+  leave it as is (a reader can't find "how is cancel O(1)?" without reading 60 entries).
+- Outdated wording ("planned", "target after M9") is fixed where it sits, and superseded entries point forward to what replaced them.
+
+### D59: README for a reader with two minutes
+Pitch, headline numbers (each linked to [BENCHMARKS.md](BENCHMARKS.md)), architecture, how correctness is checked, try it, code layout, build history.
+The milestone-by-milestone feature list and the copy of the benchmark tables go: DESIGN.md and BENCHMARKS.md hold those.
+
+### D60: Percentile plots from full histograms, drawn by our own SVG writer
+- **What:** `lob latency <journal> [runs] [dir]` also writes each book's whole-run histogram (the median run's) and the clock floor's to `<dir>/{ref,fast,clock}.hgrm`,
+  in HdrHistogram's standard percentile-distribution text format. `lob plot <out.svg> <title> <label=file.hgrm>...` draws them:
+  x is `1/(1-percentile)` on a log scale (each decade adds a nine: 90%, 99%, 99.9%...), y is nanoseconds on a log scale.
+- **Alternatives:** Python + matplotlib or gnuplot (another toolchain for a reader to install, outside `cargo test`); HdrHistogram's online plotter
+  (the `.hgrm` files still load there, but a picture in the repo shouldn't depend on a website); a plotting crate (a big dependency for one chart type).
+- **Why log-log:** the interesting part of a latency distribution is the tail, and on a linear percentile axis everything past p99 is squeezed into the last 1%.
+  Latencies span 15 ns to hundreds of µs, so a linear y axis would flatten everything below p99.9.
+- **Measured in a new run** (the M11 output kept only five percentiles), with D55's method, by `scripts/report.sh` itself.
+
+### D61: What isn't built is written down
+A "Not built" section in DESIGN.md (short version in README): what a production exchange has that this engine doesn't, and how each would fit.
+
+### D62: Every performance claim cites a measurement
+Every "faster" or number in README and DESIGN.md links to a raw output file or a dated results section (CLAUDE.md's rule). Checked once, at the end of M12.
+
+### D63: Follow-ups stay follow-ups
+Top-N snapshots (M11's 1.14 GB recovery), `perf stat` on deep200k's cancel p99, and ITCH with a controlled page cache are listed as future work, not built in M12.
