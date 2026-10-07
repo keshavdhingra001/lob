@@ -92,7 +92,7 @@ pub struct Report {
     pub clock: Histogram<u64>,
 }
 
-fn histogram() -> Histogram<u64> {
+pub fn histogram() -> Histogram<u64> {
     // Up to 10 s at 3 significant digits: every value within 0.1% of what was recorded.
     // 0 is always recordable, for a call cheaper than the clock's resolution.
     Histogram::new_with_bounds(1, 10_000_000_000, 3).expect("valid histogram bounds")

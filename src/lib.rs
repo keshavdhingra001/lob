@@ -18,6 +18,7 @@ pub mod latency;
 pub mod ledger;
 pub mod reference;
 pub mod replay;
+pub mod ring;
 pub mod rng;
 pub mod scenario;
 pub mod types;

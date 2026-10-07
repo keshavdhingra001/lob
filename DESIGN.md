@@ -869,3 +869,43 @@ flags: bit 0 side (0 buy / 1 sell; the aggressor's for a trade), bit 1 last mess
 - **Mutation checks:** 24 planted bugs across `feed.rs` and `consumer.rs`. 4 survived at first: a check that couldn't fire (removed), the
   maker-price check (test added), the link's duplicates (test added), and one equivalent mutant left as it is: not trimming the already
   replayed part of the buffer only wastes memory, since the next snapshot skips those messages anyway.
+
+### D45: A hand-written bounded SPSC ring (M9, `src/ring.rs`)
+- **What:** one producer, one consumer, a power-of-two array of slots, and two monotonically increasing indices: `tail`, written only
+  by the producer, and `head`, written only by the consumer, each on its own 64-byte cache line. A push writes the slot, then
+  publishes `tail` with `Release`. A pop reads `tail` with `Acquire`, so the slot's contents are visible before it reads them. The same holds
+  in the other direction for `head`, so a slot is never overwritten while it's still being read. Each side caches the other's index and re-reads the shared one
+  only when the cache says full or empty, so in steady flow the two cores rarely touch each other's line.
+- **Type-level guarantees:** `Producer` and `Consumer` are separate, non-`Clone` handles, so "single producer, single consumer" is enforced
+  by the compiler, not by convention. `T: Copy` means no slot ever needs dropping, which removes the hardest `unsafe` cases
+  (a panic mid-push, items left at shutdown). Dropping the `Producer` closes the ring, and the consumer sees `None` once it's drained.
+- **Waiting:** spin with `spin_loop()` for a while, then `yield_now()`. A full ring blocks the producer (backpressure); nothing is dropped.
+- **Alternatives:** `std::sync::mpsc::sync_channel` (a mutex/condvar-based MPMC design, built for generality) and crossbeam
+  (a dependency). The pipeline runs over either the ring or `sync_channel`, so the choice is measured, not asserted.
+- **Limit of the tests:** x86 is strongly ordered (TSO). Weakening `Acquire`/`Release` to `Relaxed` still passes every test here,
+  because the hardware doesn't reorder these stores. Only a model checker (loom) or a weakly ordered CPU (ARM) would catch it.
+  The orderings are argued in comments, not proven by tests.
+
+### D46: Three threads: gateway → matching → output
+- **Gateway:** decodes each command from its 32-byte journal encoding (the "wire"), stamps it, and pushes it.
+- **Matching:** pops a command, `apply`s it to the fast book, and pushes each event, then a `Done` marker carrying the command.
+  Only this thread touches the book. It never reads a clock: it copies the gateway's stamp through (D4).
+- **Output:** gathers each command's events up to `Done`, then encodes and hashes the event stream (D17), runs the publisher (D40), and records
+  end-to-end latency.
+- **Why fixed-size ring items:** a command makes a variable number of events. Sending them one by one, plus a `Done`, keeps every ring slot `Copy` and small.
+  The alternative, a `Vec` per command, allocates on the hot path (D32).
+- **Not done:** pinning each thread to a core (needs `libc` or a crate; `taskset` pins the process), a journal written by the gateway, more than one symbol.
+
+### D47: The pipeline must equal the single-threaded run
+- **What:** a single-threaded function does the same work in one loop (decode → apply → encode, hash → publish). The pipeline's event digest and feed
+  digest must equal it for random flows and for ring capacities 1, 2 and 64. Capacity 1 forces a hand-off on every item.
+- **Why:** threads must not change the output. The one ordering that matters, the order of commands into the book, is fixed by
+  having one gateway and one matching thread.
+
+### D48: Latency measured from a schedule (coordinated omission)
+- **What:** `lob pipeline <journal> [rate] [ring|mpsc]`. At rate 0 the gateway floods: that measures throughput, and latency is mostly
+  queueing. At a fixed rate the gateway sends command *i* at `start + i/rate` and stamps it with that *scheduled* time, not
+  the time it actually went out. If the pipeline stalls, the commands queued behind the stall are charged for the wait.
+- **Why:** stamping with the actual send time hides stalls. A slow pipeline also slows the sender, so fewer samples land in the bad
+  period ("coordinated omission", Gil Tene). The schedule fixes it.
+- Clock reads happen only in the gateway and output threads (D23). `Instant` is monotonic across cores on Linux (`CLOCK_MONOTONIC`).
