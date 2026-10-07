@@ -322,7 +322,7 @@ proptest! {
     /// runs past the end and really is indistinguishable from a torn write.)
     #[test]
     fn damage_before_the_last_record_is_an_error(
-        commands in prop::collection::vec(command(), 1..8),
+        commands in prop::collection::vec(command(), 2..8),
         k in any::<prop::sample::Index>(),
         at in any::<prop::sample::Index>(),
         bit in 0..8u8,
@@ -330,14 +330,12 @@ proptest! {
     ) {
         let mut bytes = journal(&commands);
         let ends = record_ends(&commands);
-        let k = k.index(commands.len());
+        let k = k.index(commands.len() - 1); // any record but the last
         let start = if k == 0 { 8 } else { ends[k - 1] };
         // The record's CRC (4 bytes) or payload (after the 2-byte length).
         let offsets: Vec<usize> = (start..start + 4).chain(start + 6..ends[k]).collect();
         bytes[offsets[at.index(offsets.len())]] ^= 1 << bit;
-        let after = bytes.len() - ends[k];
-        prop_assume!(after > 0);
-        let cut = ends[k] + 1 + extra.index(after);
+        let cut = ends[k] + 1 + extra.index(bytes.len() - ends[k]);
         prop_assert_eq!(
             read_journal(&bytes[..cut]),
             Err(lob::journal::JournalError::Corrupt(start as u64))
