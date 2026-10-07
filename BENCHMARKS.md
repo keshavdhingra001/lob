@@ -67,7 +67,7 @@ Best of 5 runs per book. "Apply" is `book.apply` alone. "Replay" adds encoding e
 
 **Real flow widens the gap because of its mix, not because each command is harder.** The reference book's cancel is no slower on AAPL
 than on generated flow (p50 95 ns vs 114 ns; see the latency tables). But real flow is 46–48% cancels and has no rejects, while `gen2m` is 12% cancels and 37% rejects. A reject costs
-about 40 ns in either book, while a cancel costs 2–2.3x more in the reference book (its O(queue) scan and tree updates; D19–D21). The fast book runs at about 29–31 M/s on every journal.
+about 40 ns in either book, while a cancel costs 2–2.3x more in the reference book (its O(queue) scan and tree updates; D19–D21). The fast book runs at about 28–31 M/s on every journal.
 
 ## Latency per command, single thread
 Nanoseconds, the median-p99 run of 5. "Kind" is what a command *did* (D26): `limit-rest` rested at least partly, `limit-cross` traded and finished,
@@ -225,7 +225,7 @@ The fast book stays at 22–47 ns from 10 to 100,000 orders. The reference book'
 Matching is the same in both books: it takes the head of the best level, which both books reach directly.
 
 ## Summary
-- **The fast book does 29–31 M commands/s on every workload, synthetic or real**, at a p50 of 45–50 ns and a p99 under 100 ns on real flow.
+- **The fast book does 28–31 M commands/s on every workload, synthetic or real**, at a p50 of 45–50 ns and a p99 under 100 ns on real flow.
 - **Against the reference book: 1.55x on generated flow, 2.4x on real flow, 20x on a deep queue.** The more cancels, the bigger the gap.
 - **Our price-time matching agrees with NASDAQ on 98.7–100% of executed shares.** The rest is NASDAQ's entry-time priority for orders displayed late.
 - **What costs the most isn't matching.** Market data (3–4x matching), the hand-offs between pipeline threads, and full-depth snapshot recovery on deep books all cost more.

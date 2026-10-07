@@ -1,9 +1,56 @@
 # lob
 
-A limit order book and matching engine written from scratch in Rust: price-time priority
-matching, deterministic replay, and measured tail latency.
+A limit order book and matching engine in Rust, written from scratch: price-time priority matching, deterministic replay,
+a lock-free three-thread pipeline, an L2 market data feed, and a real NASDAQ trading day as test input. Two book implementations,
+a simple one and a fast one, must produce the same events for every command, and every performance claim cites a measurement.
 
-> Work in progress: M0–M10 of the [roadmap](#roadmap) are done. [DESIGN.md](DESIGN.md) records every design decision.
+| On one laptop core (i7-1165G7) | Fast book | Reference book |
+|---|---|---|
+| Throughput on generated and real order flow (4 journals) | **28–31 M commands/s** | 12–20 M/s |
+| Latency per command on real AAPL flow, p50 / p99 | **48 / 91 ns** | 86 / 230 ns |
+| Cancel in a 10,000-order queue, p50 | **41 ns** | 1,068 ns |
+| Heap allocations per command, once warm | **0** | |
+
+- **Matching agrees with NASDAQ:** replaying one trading day of AAPL and SPY, 98.7% and 100% of executed shares fill the same order NASDAQ's
+  engine filled. The rest is NASDAQ's entry-time priority for orders it displays late, which an engine that only sees arrival order can't reproduce.
+- **A whole NASDAQ day** (282M messages, every symbol's book rebuilt): 0 errors, 0 orders left at the end of the day, every execution message at the best price.
+
+Sources: [BENCHMARKS.md](BENCHMARKS.md) (method, machine, every table tied to raw output in [`bench/results/`](bench/results/)),
+and [DESIGN.md](DESIGN.md) for the allocation proof (D32) and the ITCH day (M7 results).
+
+![AAPL latency percentiles, reference vs fast book](bench/results/2026-10-08-0434/latency-aapl.svg)
+
+Up to p99.9 the fast book is about 2x lower. Past p99.99 the books meet, and so does the grey line, an empty timed window:
+that part of the tail is the machine (interrupts, preemption), not the code. [More plots](BENCHMARKS.md#latency-percentile-plots-m12-d60).
+
+## Architecture
+
+```
+ journal file ──> gateway thread ──SPSC ring──> matching thread ──SPSC ring──> output thread
+                  decode, stamp                 fast book: apply()             encode + digest
+                                                Command in, Events out         L2 feed publisher
+                                                no clock, no I/O               end-to-end latency
+```
+
+- **The engine is one call:** `apply(&Command, &mut Vec<Event>)`. It never reads a clock, never uses randomness and never iterates a hash map,
+  so the same commands always give byte-identical events (checked by a pinned 64-bit digest).
+- **The fast book:** a slab of orders with an intrusive doubly linked list per price level (O(1) cancel), a tick-indexed price ladder
+  with a two-level bitmap to find the best price, a cheap hasher for the id index, and no allocation once warm.
+- **The pipeline:** a hand-written bounded SPSC ring (cache-line-padded indices, `Acquire`/`Release`). Its output equals one thread's byte for byte.
+  At full load three threads are *slower* than one: the output stage dominates, and the hand-offs between cores cost more than they save.
+- **Market data:** level updates coalesced per command, with sequence numbers, heartbeats and snapshots. A consumer detects gaps and recovers.
+
+## How correctness is checked
+
+- **Two books, one answer:** the fast book is tested against the reference book event for event, over 15M commands (D22).
+- **Oracles that don't trust the book:** an invariant checker after every command, and a ledger that rebuilds every order's open quantity
+  from the event stream alone (D10, D13).
+- **Scenario scripts** of commands and expected events ([tests/scenarios](tests/scenarios)), run against both books.
+- **Property tests** (proptest): codecs round-trip and accept only canonical bytes, decoders never panic, a damaged journal never yields a changed command,
+  the books agree on any session, a consumer survives any loss pattern (D49–D52).
+- **Real data:** a NASDAQ ITCH 5.0 day rebuilt with zero errors (D38), and one symbol's flow translated into engine commands so our matching
+  is compared with NASDAQ's (D54).
+- **Mutation checks:** every milestone plants bugs on purpose and confirms a test catches each one.
 
 ## Try it
 
@@ -42,134 +89,34 @@ digest   f0cd0c4be21b0c27
 
 The digest is the same on every run and every machine. It's pinned in the tests.
 
-## What's built so far
+Measure it yourself (about 15 minutes, needs a quiet machine; the ITCH parts need NASDAQ's sample file, which isn't in the repo):
 
-- **Property tests**: every codec round-trips and decodes only canonical bytes; decoders never panic on
-  random or edited bytes; a journal never returns a changed command; the two books agree on any session;
-  a consumer recovers from any loss pattern. Planted bugs shrink to counterexamples as small as 2 commands.
+```bash
+scripts/report.sh
+```
 
-- **Threaded pipeline**: a bounded single-producer single-consumer ring (cache-line-padded indices,
-  cached opposite index, `Acquire`/`Release`), three threads, latency measured from a send schedule so
-  stalls can't hide (coordinated omission), and output checked byte for byte against one thread.
-
-- **Market data out**: an L2 feed built from the engine's events, coalesced per command so a
-  consumer never sees a half-applied sweep, with sequence numbers, heartbeats and full-depth snapshots. A consumer
-  detects gaps, buffers, and resumes from a snapshot plus its buffer.
-
-- **Zero-allocation hot path**: once warmed up, the fast book applies millions of commands without a
-  single heap allocation, proven by a counting allocator. Order ids must increase per session (as on
-  Nasdaq OUCH), price levels live in a tick-indexed ladder with a two-level bitmap, and the id
-  index uses a cheap MurmurHash3 finalizer.
-- **Latency measurement**: per-command p50 / p99 / p99.9 / max for each kind of command
-  (`lob latency`, HdrHistogram), the clock's own cost reported alongside, runs that alternate
-  between the books on a pinned core, and criterion microbenchmarks at fixed book depths.
-- **Fast book**: a slab of orders with an intrusive doubly linked list per price level, O(1)
-  cancel by id, and a cached best level. It produces identical events to the reference book over
-  15 million differential-tested commands.
-- **Reference book**: price-time priority matching for limit, market and cancel. Every trade
-  happens at the resting order's price. It's built to be obviously correct, and it's the oracle
-  the fast book (M4) is tested against.
-- **Scenario tests**: scripts of commands and their expected events
-  ([tests/scenarios](tests/scenarios)), checked against every book. An invariant checker runs
-  after every command, and the tests are mutation-checked.
-- **Order lifecycle**: modify with exchange-style priority rules (a lower size keeps your place,
-  anything else moves you to the back), plus IOC, fill-or-kill and post-only orders, and tick size
-  and fat-finger quantity limits.
-- **Conservation ledger**: an outside check that rebuilds every order's open quantity from the
-  event stream alone and matches it against the book after each command, over thousands of
-  random sessions.
-- **Deterministic replay**: a checksummed binary command journal (torn tails tolerated,
-  mid-file damage refused) and a sequence-numbered binary event stream with a 64-bit digest.
-  Replays are byte-identical.
-- **Synthetic order flow**: a seeded generator with a random-walk mid, queues building at the
-  touch, and frequent cancels and modifies.
-- **Command and event model** with a text format whose parser and printer round-trip.
-
-## Results so far
-
-Throughput on one core (`lob bench`, release, best of 5, matching only):
-
-| Workload | Reference book | Fast book | Speedup |
-|---|---|---|---|
-| Generated order flow, 2M commands | 13.6 M/s | 16.1 M/s | 1.19x |
-| One queue of 50,000 orders, cancelled in random order | 0.30 M/s | 15.2 M/s | 51x |
-
-On realistic flow both books spend most of their time on the same costs (hashing, the price tree,
-emitting events). The fast book's structure guarantees cancels cost the same however deep a
-queue gets. Details are in [DESIGN.md](DESIGN.md) (D22).
-
-Latency per cancel (`scripts/latency.sh`, release, one pinned laptop core, ns, includes about 14 ns of clock cost):
-
-| Workload | Reference p50 / p99 | Fast p50 / p99 |
-|---|---|---|
-| Generated order flow, 2M commands | 106 / 179 | 49 / 106 |
-| One queue of 10,000 orders, cancelled in random order | 1,086 / 3,557 | 44 / 61 |
-
-Limit, market and reject latencies are the same in both books.
-
-After M6 (zero allocations, increasing ids, a price ladder), on the same 2M generated commands, fast book:
-
-| | M5 | M6 |
-|---|---|---|
-| p50 / p99, all commands | 57 / 297 ns | 42 / 186 ns |
-| Resting a limit order, p50 / p99 | 98 / 264 ns | 50 / 95 ns |
-| Worst case | 10 ms | 0.13 ms |
-| CPU cycles per command | 281 | 124 |
-
-The 10 ms worst case was a set of every order id ever used, rehashing as it grew. Details are in [DESIGN.md](DESIGN.md) (D30–D34, M6 results).
-
-M7 replays a real NASDAQ TotalView-ITCH 5.0 day (30 July 2019, 282M messages) and rebuilds the book of every symbol:
+## Code layout
 
 | | |
 |---|---|
-| Errors (unknown order, overfill, wrong symbol) | 0 in 277M book messages |
-| Orders left at the end of the day | 0 of 125.5M added |
-| `E` executions at the best price | 7,582,422 of 7,582,422 |
-| Crossed books outside auction unwinds | 0 |
-| Throughput: frame / decode / full rebuild | 43 / 29 / 3.8 M messages/s (uncompressed); rebuild 3.1 M/s from `.gz` |
+| [`command.rs`](src/command.rs), [`types.rs`](src/types.rs), [`book.rs`](src/book.rs) | Commands, events, integer prices, the `OrderBook` trait |
+| [`reference.rs`](src/reference.rs) | The reference book: `BTreeMap` of `VecDeque`s, obviously correct |
+| [`fast.rs`](src/fast.rs), [`ladder.rs`](src/ladder.rs), [`hash.rs`](src/hash.rs) | The fast book, its price ladder, its id hasher |
+| [`journal.rs`](src/journal.rs), [`replay.rs`](src/replay.rs) | Binary command journal, sequenced events, digest |
+| [`scenario.rs`](src/scenario.rs), [`ledger.rs`](src/ledger.rs), [`gen.rs`](src/gen.rs), [`rng.rs`](src/rng.rs) | Test oracles and seeded order flow |
+| [`feed.rs`](src/feed.rs), [`consumer.rs`](src/consumer.rs) | L2 market data out, and a consumer that recovers from gaps |
+| [`ring.rs`](src/ring.rs), [`pipeline.rs`](src/pipeline.rs) | SPSC ring, three-thread pipeline |
+| [`itch.rs`](src/itch.rs), [`itch_book.rs`](src/itch_book.rs), [`itch_flow.rs`](src/itch_flow.rs) | NASDAQ ITCH 5.0 parser, book rebuild, translation into engine commands |
+| [`latency.rs`](src/latency.rs), [`plot.rs`](src/plot.rs), [`benches/`](benches/), [`scripts/`](scripts/) | Measurement harness, percentile plots, criterion, the report script |
+| [`main.rs`](src/main.rs) | The `lob` CLI: REPL, `gen`, `replay`, `bench`, `latency`, `plot`, `feed`, `pipeline`, `itch` |
 
-`lob itch <file> [frame|decode|book|dump] [symbol]`. The sample files are at emi.nasdaq.com/ITCH and aren't in the repo.
-Details are in [DESIGN.md](DESIGN.md) (D35–D39, M7 results).
+## Not built
 
-M8 publishes market data from the engine's events: level updates (each level's new total, sent once per command),
-trades, sequence numbers, heartbeats, and full-depth snapshots. A consumer detects gaps and recovers from a snapshot plus the
-messages it buffered. On the same 2M generated commands:
+No network gateway (input is a journal file, so every latency is in-process), one symbol, no auctions, no hidden or iceberg orders,
+no self-trade prevention, no risk checks beyond a fat-finger quantity limit, no crash recovery beyond replaying the journal.
+[DESIGN.md](DESIGN.md#not-built-d61) says where each would go.
 
-| | |
-|---|---|
-| Feed | 1.25M level updates + 0.69M trades, 27.8 bytes per command |
-| Cost on top of matching | +70 ns per command (matching alone: 30 ns) |
-| 1% loss, 5% duplicates | 19,030 gaps, each healed by one snapshot; the final book matches the engine's |
-
-Every command's updates are checked to be exactly the change in the book's depth, on both books, and a consumer on a
-lossy link is checked never to show a book the engine didn't have. `lob feed <journal> [drop-percent] [seed]`.
-Details are in [DESIGN.md](DESIGN.md) (D40–D44, M8 results).
-
-M9 runs the engine as three threads, gateway -> matching -> output, joined by a hand-written lock-free SPSC ring. Its output is
-byte-identical to one thread. On the same 2M commands, three physical cores of a laptop:
-
-| | ring | `std::sync::mpsc` |
-|---|---|---|
-| End-to-end p50 / p99 at 1M commands/s (latency from the schedule) | 0.82 / 15.9 µs | 4.3 / 55 µs |
-| Throughput, flooding (one thread: 5.0 M/s) | 3.9 M/s | 3.6 M/s |
-
-At full load three threads are *slower* than one: the output stage (hashing and market data) is about 165 of the 200 ns per
-command, so splitting off matching saves little and the hand-offs between cores cost more. `lob pipeline <journal> [rate] [ring|mpsc]`.
-Details are in [DESIGN.md](DESIGN.md) (D45–D48, M9 results).
-
-M11 measures everything again in one session and adds real order flow: one symbol's ITCH day translated into engine commands, with each
-execution becoming an order that our engine matches (D54). The full report, with method, machine and raw output, is in [BENCHMARKS.md](BENCHMARKS.md).
-
-| | Reference book | Fast book |
-|---|---|---|
-| Throughput, generated flow / AAPL / SPY | 19.7 / 12.0 / 13.0 M/s | 30.7 / 28.8 / 30.9 M/s |
-| p50 / p99 per command, AAPL | 86 / 230 ns | 48 / 91 ns |
-| Cancel in a 10,000-order queue, p50 | 1,068 ns | 41 ns |
-
-98.7% (AAPL) and 100% (SPY) of the executed shares fill the same order NASDAQ's matching filled. The rest comes from NASDAQ keeping
-entry-time priority for orders it displays late. `scripts/report.sh` reproduces it all (about 15 minutes).
-
-## Roadmap
+## Build history
 
 - [x] **M0** Scaffold: command/event model, text format, `OrderBook` trait, REPL
 - [x] **M1** Reference book: price-time priority, limit / market / cancel, scenario tests, invariant checker
@@ -183,4 +130,6 @@ entry-time priority for orders it displays late. `scripts/report.sh` reproduces 
 - [x] **M9** Engine pipeline: gateway -> lock-free SPSC ring -> matching -> output ring
 - [x] **M10** Property tests (proptest): codecs, journal damage, engine and feed
 - [x] **M11** Benchmark report: one script, real ITCH flow through both books, BENCHMARKS.md
-- [ ] **M12** Final design write-up
+- [x] **M12** Final write-up: DESIGN overview and index, percentile plots, this README
+
+Each milestone's decisions are in [DESIGN.md](DESIGN.md), numbered D1–D63.
