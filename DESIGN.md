@@ -815,6 +815,12 @@ E 7.58M, I 3.72M, X 2.36M, P 1.46M, F 1.30M, L 211k, C 136k, Q 17.7k, and a few 
   recovery feed) suit many consumers. On request suits a test, and the consumer logic is the same.
 - **Why:** this is the standard incremental-plus-snapshot pattern. The two cases a naive version gets wrong are messages older than the
   snapshot and a gap inside the buffer.
+- **Added during implementation: heartbeats.** The lossy-link test failed at its first run. A command whose only message was dropped
+  left the consumer showing the previous book and calling it consistent. Nothing later told it that message 221 existed until 222 arrived.
+  A feed can't detect a lost *last* message without being told the current sequence number, so the publisher side sends a heartbeat
+  (its last sequence number) after each command, and the consumer treats a heartbeat ahead of it as a gap. Real feeds do the same when
+  idle (MoldUDP64 heartbeats). The test's property was sharpened too: a consistent consumer shows the engine's book *as of its own
+  sequence number*. That may not be the latest book, but it is never one that didn't exist. Code: `src/consumer.rs` (`Consumer`, and the seeded `Link`).
 
 ### D43: Binary wire format
 Fixed-width little-endian, like the journal and replay streams (D15, D17):

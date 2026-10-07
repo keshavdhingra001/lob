@@ -5,7 +5,10 @@
 mod common;
 
 use common::random_command;
+use std::collections::HashMap;
+
 use lob::book::Level;
+use lob::consumer::{Consumer, Link};
 use lob::feed::{self, Msg, Publisher};
 use lob::gen::Generator;
 use lob::replay::Fnv64;
@@ -153,4 +156,86 @@ fn generated_flow_feed_is_identical_on_both_books_and_pinned() {
     assert_eq!(a, b);
     // Pinned like the event digest (D17): a change here changes the feed's bytes.
     assert_eq!(a, 0x1bef_8ebc_21b7_ca92);
+}
+
+/// Publish `commands` over a lossy link. Whenever the consumer says its book is consistent,
+/// it must be the engine's book as of the consumer's sequence number: maybe not the latest
+/// (a lost last message shows only at the next heartbeat), but never one that didn't exist.
+/// Returns the consumer's stats and how many commands it was consistent and up to date after.
+fn lossy(
+    seed: u64,
+    commands: impl Iterator<Item = Command>,
+    mut consumer: Consumer,
+    drop_pct: u64,
+) -> (lob::consumer::Stats, usize) {
+    let mut book = FastBook::with_config(EDGE);
+    let mut publisher = Publisher::new();
+    let mut link = Link::new(seed, drop_pct, 5);
+    if !consumer.is_live() {
+        link.request_snapshot(&publisher);
+    }
+    // The engine's depth after each sequence number that ended a command.
+    let mut history = HashMap::from([(0, depth(&book))]);
+    let (mut events, mut msgs) = (Vec::new(), Vec::new());
+    let mut current = 0;
+    let consumer_depth = |c: &Consumer| [Side::Buy, Side::Sell].map(|s| c.depth(s, usize::MAX));
+    for (n, cmd) in commands.enumerate() {
+        events.clear();
+        msgs.clear();
+        book.apply(&cmd, &mut events);
+        publisher.on_command(&cmd, &events, &mut msgs).unwrap();
+        history.insert(publisher.seq(), depth(&book));
+        link.deliver(&publisher, &msgs, &mut consumer);
+        if consumer.is_consistent() {
+            let want = history
+                .get(&consumer.seq())
+                .unwrap_or_else(|| panic!("seed {seed}, command #{n}: mid-command seq"));
+            assert_eq!(
+                &consumer_depth(&consumer),
+                want,
+                "seed {seed}, command #{n}"
+            );
+            current += (consumer.seq() == publisher.seq()) as usize;
+        }
+    }
+    link.settle(&publisher, &mut consumer);
+    assert!(consumer.is_consistent());
+    assert_eq!(
+        consumer_depth(&consumer),
+        depth(&book),
+        "seed {seed}, at the end"
+    );
+    (consumer.stats(), current)
+}
+
+#[test]
+fn a_consumer_recovers_from_loss_and_duplicates() {
+    for seed in 0..10 {
+        let n = 3_000;
+        let (stats, checked) = lossy(seed, random(seed, n, 1), Consumer::new(), 3);
+        // Guard against a test that stopped testing: loss, recovery and checks all happen.
+        assert!(
+            stats.gaps > 10 && stats.snapshots > 10,
+            "seed {seed}: {stats:?}"
+        );
+        assert!(stats.duplicates > 10, "seed {seed}: {stats:?}");
+        assert!(
+            checked > n / 2,
+            "seed {seed}: up to date after only {checked} commands"
+        );
+    }
+}
+
+#[test]
+fn a_lossless_link_needs_no_snapshot() {
+    let (stats, checked) = lossy(1, random(1, 3_000, 1), Consumer::new(), 0);
+    assert_eq!((stats.gaps, stats.snapshots), (0, 0));
+    assert_eq!(checked, 3_000);
+}
+
+#[test]
+fn a_late_joiner_catches_up() {
+    let (stats, checked) = lossy(2, random(2, 3_000, 1), Consumer::late_joiner(), 0);
+    assert_eq!((stats.gaps, stats.snapshots), (0, 1));
+    assert!(checked > 2_990);
 }
