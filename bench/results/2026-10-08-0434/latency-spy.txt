@@ -1,0 +1,34 @@
+== latency-spy: taskset -c 2 target/release/lob latency target/latency/spy.jrnl 5 bench/results/2026-10-08-0434/hgrm/spy
+quiet (idle 90%)
+cpu      11th Gen Intel(R) Core(TM) i7-1165G7 @ 2.80GHz
+kernel   7.2.5-3-omarchy
+governor powersave (epp performance, no_turbo 0)
+cpus     2 (the cpus this process may run on)
+2231472 commands from target/latency/spy.jrnl; warm-up, then 5 runs per book, alternating books; showing the run with the median p99
+
+reference (p99/floor per run: 174/14 183/14 158/14 162/13 163/14 ns)
+kind             count    mean     p50     p99   p99.9       max   (ns)
+limit-rest     1106199      78      70     162     700    138623
+limit-cross      55538      71      57     163     923     15447
+limit-kill           0
+market               0
+cancel         1062153      96      89     164     536    131199
+modify            7582      85      75     157     829     15655
+reject               0
+all            2231472      86      78     163     645    138623
+clock floor    2231472      15      14      19      27     23007
+
+fast (p99/floor per run: 88/14 90/14 89/14 80/14 88/14 ns)
+kind             count    mean     p50     p99   p99.9       max   (ns)
+limit-rest     1106199      53      47      94     479    124415
+limit-cross      55538      57      51     110     411     14415
+limit-kill           0
+market               0
+cancel         1062153      45      41      79     173     33823
+modify            7582      38      34      58     434     10599
+reject               0
+all            2231472      50      44      88     370    124415
+clock floor    2231472      14      14      16      24     18447
+
+histograms written to bench/results/2026-10-08-0434/hgrm/spy/{ref,fast,clock}.hgrm
+uptime:  04:34:48 up 1 day,  9:10,  1 user,  load average: 4.37, 5.81, 4.36

@@ -1,0 +1,34 @@
+== latency-queue10k: taskset -c 2 target/release/lob latency target/latency/queue10k.jrnl 5 bench/results/2026-10-08-0434/hgrm/queue10k
+quiet (idle 93%)
+cpu      11th Gen Intel(R) Core(TM) i7-1165G7 @ 2.80GHz
+kernel   7.2.5-3-omarchy
+governor powersave (epp performance, no_turbo 0)
+cpus     2 (the cpus this process may run on)
+20000 commands from target/latency/queue10k.jrnl; warm-up, then 5 runs per book, alternating books; showing the run with the median p99
+
+reference (p99/floor per run: 4403/13 3833/13 4183/13 4155/13 4611/14 ns)
+kind             count    mean     p50     p99   p99.9       max   (ns)
+limit-rest       10000      74      38      70    1240    140031
+limit-cross          0
+limit-kill           0
+market               0
+cancel           10000    1533    1196    4467    7643    142207
+modify               0
+reject               0
+all              20000     804      73    4183    6395    142207
+clock floor      20000      13      13      16      16      1423
+
+fast (p99/floor per run: 128/14 119/13 115/13 118/13 122/13 ns)
+kind             count    mean     p50     p99   p99.9       max   (ns)
+limit-rest       10000      67      35     119    2467     64831
+limit-cross          0
+limit-kill           0
+market               0
+cancel           10000      40      37     119     508       906
+modify               0
+reject               0
+all              20000      53      36     119     815     64831
+clock floor      20000      13      13      14      14      1642
+
+histograms written to bench/results/2026-10-08-0434/hgrm/queue10k/{ref,fast,clock}.hgrm
+uptime:  04:34:31 up 1 day,  9:10,  1 user,  load average: 5.09, 6.04, 4.40

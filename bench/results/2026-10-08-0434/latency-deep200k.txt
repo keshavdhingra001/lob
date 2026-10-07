@@ -1,0 +1,34 @@
+== latency-deep200k: taskset -c 2 target/release/lob latency target/latency/deep200k.jrnl 5 bench/results/2026-10-08-0434/hgrm/deep200k
+quiet (idle 92%)
+cpu      11th Gen Intel(R) Core(TM) i7-1165G7 @ 2.80GHz
+kernel   7.2.5-3-omarchy
+governor powersave (epp performance, no_turbo 0)
+cpus     2 (the cpus this process may run on)
+2000000 commands from target/latency/deep200k.jrnl; warm-up, then 5 runs per book, alternating books; showing the run with the median p99
+
+reference (p99/floor per run: 349/14 687/15 371/14 336/14 332/14 ns)
+kind             count    mean     p50     p99   p99.9       max   (ns)
+limit-rest      542826      90      75     242     821    566271
+limit-cross     398384      79      41     477    1385     31327
+limit-kill       50335      51      45      95     391     34495
+market           73371      59      43     211     597     25631
+cancel           98865     204     160     693    7207     75071
+modify           25693     248     209     779    7179     27135
+reject          810526      40      35      83     299    117503
+all            2000000      73      45     349     980    566271
+clock floor    2000000      15      14      21      29    132095
+
+fast (p99/floor per run: 232/14 304/14 256/14 247/14 328/15 ns)
+kind             count    mean     p50     p99   p99.9       max   (ns)
+limit-rest      542826      57      50     101     662    195711
+limit-cross     398384      75      40     490    1505     27551
+limit-kill       50335      45      41      76     373     14479
+market           73371      48      34     182     573     16751
+cancel           98865      78      60     297    1055     50975
+modify           25693     100      79     336    2841     16087
+reject          810526      32      28      66     257     28991
+all            2000000      51      39     256     836    195711
+clock floor    2000000      15      14      20      26    128447
+
+histograms written to bench/results/2026-10-08-0434/hgrm/deep200k/{ref,fast,clock}.hgrm
+uptime:  04:34:27 up 1 day,  9:10,  1 user,  load average: 5.09, 6.04, 4.40

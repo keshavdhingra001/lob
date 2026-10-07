@@ -1,0 +1,68 @@
+== latency-gen2m: taskset -c 2 target/release/lob latency target/latency/gen2m.jrnl 5 bench/results/2026-10-08-0434/hgrm/gen2m
+quiet (idle 94%)
+cpu      11th Gen Intel(R) Core(TM) i7-1165G7 @ 2.80GHz
+kernel   7.2.5-3-omarchy
+governor powersave (epp performance, no_turbo 0)
+cpus     2 (the cpus this process may run on)
+2000000 commands from target/latency/gen2m.jrnl; warm-up, then 5 runs per book, alternating books; showing the run with the median p99
+
+reference (p99/floor per run: 280/14 241/13 243/13 251/15 321/20 ns)
+kind             count    mean     p50     p99   p99.9       max   (ns)
+limit-rest      564749      86      75     223     393    129919
+limit-cross     303074      73      44     369     630     23519
+limit-kill       42726      52      47      98     206     15351
+market           66841      59      43     197     307    129855
+cancel          231221     118     113     198     471     16511
+modify           46291     173     134     363     597    130687
+reject          745098      38      35      70     119    128191
+all            2000000      70      55     251     469    130687
+clock floor    2000000      15      15      20      26    129279
+
+fast (p99/floor per run: 167/13 171/13 171/15 174/15 285/20 ns)
+kind             count    mean     p50     p99   p99.9       max   (ns)
+limit-rest      564749      55      49      95     463    111551
+limit-cross     303074      67      42     345     606    140415
+limit-kill       42726      45      41      88     515     16079
+market           66841      48      34     166     474     12263
+cancel          231221      49      47      78     157     29695
+modify           46291      72      62     154     447     11271
+reject          745098      31      28      61     105    145663
+all            2000000      47      41     171     462    145663
+clock floor    2000000      15      15      21      33     25871
+
+histograms written to bench/results/2026-10-08-0434/hgrm/gen2m/{ref,fast,clock}.hgrm
+uptime:  04:34:18 up 1 day,  9:10,  1 user,  load average: 5.74, 6.20, 4.43
+== latency-gen2m: taskset -c 2 target/release/lob latency target/latency/gen2m.jrnl 5 bench/results/2026-10-08-0434/hgrm/gen2m
+quiet (idle 95%)
+cpu      11th Gen Intel(R) Core(TM) i7-1165G7 @ 2.80GHz
+kernel   7.2.5-3-omarchy
+governor powersave (epp performance, no_turbo 0)
+cpus     2 (the cpus this process may run on)
+2000000 commands from target/latency/gen2m.jrnl; warm-up, then 5 runs per book, alternating books; showing the run with the median p99
+
+reference (p99/floor per run: 239/14 247/14 236/14 241/14 243/14 ns)
+kind             count    mean     p50     p99   p99.9       max   (ns)
+limit-rest      564749      81      71     214     512    133759
+limit-cross     303074      69      43     346     627    112447
+limit-kill       42726      50      45      95     495      9783
+market           66841      55      42     191     458     13151
+cancel          231221     114     109     187     345    109567
+modify           46291     165     132     358     728     79743
+reject          745098      34      33      61     127     26111
+all            2000000      66      52     241     485    133759
+clock floor    2000000      14      14      18      24    111295
+
+fast (p99/floor per run: 169/14 176/14 166/14 170/14 174/14 ns)
+kind             count    mean     p50     p99   p99.9       max   (ns)
+limit-rest      564749      53      48      93     483    128767
+limit-cross     303074      66      42     345     601    124415
+limit-kill       42726      44      40      81     441     11743
+market           66841      47      34     164     520     13311
+cancel          231221      48      46      71     146    128063
+modify           46291      73      57     148     470    119551
+reject          745098      30      27      61     111     27327
+all            2000000      46      40     170     470    128767
+clock floor    2000000      14      14      19      25    118975
+
+histograms written to bench/results/2026-10-08-0434/hgrm/gen2m/{ref,fast,clock}.hgrm
+uptime:  04:35:43 up 1 day,  9:11,  1 user,  load average: 3.91, 5.42, 4.30
