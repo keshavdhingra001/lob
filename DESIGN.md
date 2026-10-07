@@ -690,3 +690,37 @@ had noisy runs, so M5 vs M6 here is a rough guide; the alternated latency A/B ab
   measured: at 100k orders the slab (3.2 MB of 32-byte nodes) and index outgrow L2, so the result depends on where pages land.
   `perf stat` on L2/LLC misses for just that bench would settle it.
 - Match costs about the same in both books at 10 and 1k orders (within 10%); crossing one maker is mostly shared work.
+
+### D35: Real data is one NASDAQ sample day (M7)
+- **What:** `07302019.NASDAQ_ITCH50.gz` (30 July 2019, 3.66 GB gzipped), the smallest full day on NASDAQ's public
+  sample site (emi.nasdaq.com/ITCH). It lives in `data/`, which git ignores. Everything streams from the `.gz`;
+  an uncompressed copy is only made to measure decompression's share (D39).
+- **Amended while building:** D35 proposed committing a small slice of the real file as a test fixture. I didn't,
+  because the repo may go public and NASDAQ's redistribution terms for the samples aren't clear. The unit tests build
+  their streams with `itch::encode` instead, and the whole-day run is an `#[ignore]` test that skips when the file isn't there.
+- **Why one day:** one day is about 300M messages and every kind of event (opening and closing crosses, halts). More days
+  would add disk and download time, not new behaviour.
+
+### D36: Zero-copy ITCH 5.0 parser (`src/itch.rs`)
+- **What:** `Reader` splits the stream on the 2-byte length prefix and returns each message as a slice of its one
+  1 MiB buffer; `decode` reads the fields out of that slice into a `Copy` enum. All 23 types are length-checked
+  against their fixed sizes; the 11 the book and checks need are decoded, and the rest are `Body::Other`.
+- **Why:** nothing is allocated per message, and nothing is copied except the fields themselves.
+  The reader isn't an `Iterator` because each slice borrows the reader's buffer until the next call (a "lending"
+  iterator, which `Iterator` can't express).
+- **Why a wrong length is fatal:** every type has one fixed length, so a mismatch means the framing slipped, and
+  everything after it would decode as garbage. Stopping there with the message index and byte offset is the only safe choice.
+- **Tests:** two messages written out byte by byte from the spec's tables (so an offset that's wrong in both
+  `encode` and `decode` still fails), round trips for every decoded type with extreme values (including a 48-bit
+  timestamp), and a reader fed 1, 2, 3, 7, ... bytes at a time so messages straddle reads and the buffer's end.
+- **Dependency:** `flate2` with the `zlib-rs` backend (pure Rust; the default `miniz_oxide` is slower to inflate).
+
+### D37: A separate `ItchBook` that replays the exchange's book
+- **What:** `ItchBook` applies add / execute / cancel / delete / replace by NASDAQ's order reference number and keeps
+  every symbol's visible book. It doesn't match: ITCH reports the trades NASDAQ already made, so running the
+  messages through our matching engine would produce trades that never happened.
+- **Amended while building:** D37 proposed reusing the M6 ladder. That doesn't fit here. A ladder side is 264 KiB once
+  used, and about 8,900 symbols × 2 sides would be about 4.7 GB. It also requires prices on one tick grid, and stocks under $1
+  are quoted in $0.0001 steps while the rest use $0.01. So each side is a `BTreeMap<price, (shares, orders)>`, and the
+  order index is a `HashMap` with the M6 fmix64 hasher (D31). The M6 structures stay in the matching engine, where
+  one symbol and one tick size hold.
