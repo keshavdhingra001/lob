@@ -983,7 +983,7 @@ properties have teeth, and it shows what shrinking buys over a seeded random tes
 (1.4M cases, 3.1 s) and `20000` for the engine and feed (40k sessions of up to 150 commands, about 10 s). Both passed. No real bug was found: the M1–M9 decoders were
 already strict. In particular, every payload a decoder accepts is the canonical encoding of what it decoded (no trailing bytes, no second spelling).
 
-**Mutation checks (D52):** 19 planted bugs, 9 in codecs and 5 in the fast book, plus re-checks. Codecs: 7 caught at once. The journal's torn-tail condition
+**Mutation checks (D52):** 16 planted bugs, 11 in the codecs and 5 in the fast book. Codecs: 9 caught at once, 2 survived. The journal's torn-tail condition
 (`end == rest.len()` → `end + 1 >= rest.len()`) survived, which led to the D16 property "damage before the last record is an error". It now fails with this shrunk input:
 two all-zero limit orders, bit 0 of the first record's CRC flipped, and one byte of the second record left after the cut. ITCH `printable` (`== b'Y'` → `!= b'N'`)
 survives. It's equivalent on valid data, since the spec only allows `Y` or `N`.
