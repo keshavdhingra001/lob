@@ -8,7 +8,7 @@
 //! lob gen-queue <orders> <journal>      worst case: one deep queue, cancelled in random order
 //! lob latency <journal> [runs]          per-command latency percentiles for both books
 //! lob run <ref|fast|none> <journal> [repeats]   apply only, no timing: for `perf stat` (D29)
-//! lob itch <file[.gz]> [frame|decode|book] [symbol]   replay a NASDAQ ITCH 5.0 day (D36–D39)
+//! lob itch <file[.gz]> [frame|decode|book|dump] [symbol]   replay a NASDAQ ITCH 5.0 day (D36–D39)
 //! ```
 
 use std::fs::{self, File};
@@ -44,10 +44,11 @@ usage:
                                         (runs: default 5; pin it with `taskset -c <cpu>`)
   lob run <ref|fast|none> <journal> [repeats]   apply only, nothing timed or printed per command,
                                         for `perf stat`; `none` only decodes (the baseline)
-  lob itch <file[.gz]> [frame|decode|book] [symbol]   replay a NASDAQ ITCH 5.0 file: frame only,
-                                        frame + decode, or rebuild every book (default), and print
-                                        messages/s; `book` also prints the symbol's depth at 16:00
-                                        (default AAPL) and the D38 checks";
+  lob itch <file[.gz]> [frame|decode|book|dump] [symbol]   replay a NASDAQ ITCH 5.0 file: frame
+                                        only, frame + decode, or rebuild every book (default), and
+                                        print messages/s; `book` also prints the symbol's depth at
+                                        16:00 (default AAPL) and the D38 checks; `dump` prints the
+                                        symbol's messages";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -292,8 +293,10 @@ fn itch_replay(path: &str, mode: &str, symbol: &str) -> Result<(), String> {
     use lob::itch_book::{ItchBook, Phase};
     use lob::Side;
 
-    if !["frame", "decode", "book"].contains(&mode) {
-        return Err(format!("unknown mode `{mode}` (frame, decode or book)"));
+    if !["frame", "decode", "book", "dump"].contains(&mode) {
+        return Err(format!(
+            "unknown mode `{mode}` (frame, decode, book or dump)"
+        ));
     }
     let want = Stock::new(symbol);
     let mut reader = itch::open(path.as_ref()).map_err(|e| format!("{path}: {e}"))?;
@@ -313,6 +316,21 @@ fn itch_replay(path: &str, mode: &str, symbol: &str) -> Result<(), String> {
         "decode" => {
             while let Some(m) = reader.next_message().map_err(err)? {
                 fold ^= m.header.timestamp;
+            }
+        }
+        "dump" => {
+            // Every message for one symbol, plus system events: for looking into a check.
+            let mut locate = None;
+            while let Some(m) = reader.next_message().map_err(err)? {
+                if let itch::Body::StockDirectory { stock } = m.body {
+                    if stock == want {
+                        locate = Some(m.header.locate);
+                    }
+                }
+                let ours = locate == Some(m.header.locate);
+                if ours || matches!(m.body, itch::Body::SystemEvent { .. }) {
+                    println!("{} {:?}", clock(m.header.timestamp), m.body);
+                }
             }
         }
         _ => {
@@ -362,6 +380,10 @@ fn itch_replay(path: &str, mode: &str, symbol: &str) -> Result<(), String> {
         println!(
             "locked  (pre, market, post): {:?}, after the open: {}",
             s.locked, s.locked_after_open
+        );
+        println!(
+            "crossed or locked while a cross was unwinding: {}",
+            s.crossed_while_uncrossing
         );
         println!(
             "E at best (pre, market, post): {:?}, not at best: {:?}; C executions: {}",

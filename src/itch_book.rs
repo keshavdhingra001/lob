@@ -81,6 +81,10 @@ pub struct SymbolBook {
     pub state: u8,
     /// Set by this symbol's opening cross print (`Q` with cross type O).
     pub opened: bool,
+    /// Between a cross print and the first book message that isn't a `C` execution: the
+    /// auction's executions are still arriving. NASDAQ sends the print (and, after a halt,
+    /// the state change back to T) before them, so the book is briefly crossed by design.
+    pub uncrossing: bool,
     bids: BTreeMap<u32, Level>,
     asks: BTreeMap<u32, Level>,
 }
@@ -173,10 +177,13 @@ pub struct Stats {
     /// Book changes on a symbol in state T that left it crossed (bid > ask) / locked (bid == ask).
     pub crossed: [u64; 3],
     pub locked: [u64; 3],
-    /// The same during market hours, but only after the symbol's opening cross.
+    /// The same during market hours, but only after the symbol's opening cross, and not
+    /// while a cross is being unwound. These are the ones that would be real anomalies.
     pub crossed_after_open: u64,
     pub locked_after_open: u64,
-    /// The first few crossed or locked books in market hours after the open.
+    /// Crossed or locked books (any phase) while a cross's executions were still arriving.
+    pub crossed_while_uncrossing: u64,
+    /// The first few `crossed_after_open` / `locked_after_open` books.
     pub examples: Vec<Crossing>,
     /// `E` executions on a symbol in state T: at the best price on the order's side, or not.
     pub executed_at_best: [u64; 3],
@@ -352,7 +359,8 @@ impl ItchBook {
         if bid < ask {
             return;
         }
-        let after_open = phase == Phase::Market && book.opened;
+        let uncrossing = book.uncrossing;
+        let after_open = phase == Phase::Market && book.opened && !uncrossing;
         let example = Crossing {
             stock: book.stock,
             timestamp,
@@ -360,6 +368,7 @@ impl ItchBook {
             ask,
         };
         let s = &mut self.stats;
+        s.crossed_while_uncrossing += u64::from(uncrossing);
         if bid > ask {
             s.crossed[phase as usize] += 1;
             s.crossed_after_open += u64::from(after_open);
@@ -393,6 +402,7 @@ impl ItchBook {
                     stock,
                     state: 0,
                     opened: false,
+                    uncrossing: false,
                     bids: BTreeMap::new(),
                     asks: BTreeMap::new(),
                 });
@@ -403,8 +413,10 @@ impl ItchBook {
                 return Ok(());
             }
             Body::CrossTrade { cross_type, .. } => {
+                let book = self.book_mut(locate)?;
+                book.uncrossing = true;
                 if cross_type == b'O' {
-                    self.book_mut(locate)?.opened = true;
+                    book.opened = true;
                 }
                 return Ok(());
             }
@@ -446,6 +458,9 @@ impl ItchBook {
             Body::Trade { .. } | Body::Other(_) => return Ok(()),
         }
         self.stats.book_messages += 1;
+        if !matches!(msg.body, Body::ExecutedWithPrice { .. }) {
+            self.book_mut(locate)?.uncrossing = false;
+        }
         self.note_crossing(locate, msg.header.timestamp);
         Ok(())
     }
@@ -783,6 +798,48 @@ mod tests {
             }]
         );
 
+        // The SES sequence from the sample day (D38): a pause leaves the book crossed, the
+        // halt cross prints and the state goes back to T, and only then do the `C`
+        // executions remove the crossed orders. That window is counted apart.
+        let halt_cross = msg(
+            L,
+            Body::CrossTrade {
+                shares: 10,
+                stock,
+                price: 995,
+                match_number: 0,
+                cross_type: b'H',
+            },
+        );
+        apply_all(
+            &mut b,
+            &[
+                msg(L, Body::Delete { order_ref: 3 }),
+                msg(L, Body::TradingAction { stock, state: b'P' }),
+                add(5, Side::Sell, 10, 990),
+                add(6, Side::Sell, 10, 995),
+                halt_cross,
+                msg(L, Body::TradingAction { stock, state: b'T' }),
+                msg(
+                    L,
+                    Body::ExecutedWithPrice {
+                        order_ref: 1,
+                        shares: 5,
+                        match_number: 0,
+                        printable: false,
+                        price: 995,
+                    },
+                ),
+            ],
+        );
+        assert_eq!(b.stats().crossed_while_uncrossing, 1);
+        assert_eq!(b.stats().crossed_after_open, 1, "unchanged");
+        // The first other book message ends the window: still crossed now counts.
+        apply_all(&mut b, &[msg(L, Body::Delete { order_ref: 6 })]);
+        assert_eq!(b.stats().crossed_while_uncrossing, 1);
+        assert_eq!(b.stats().crossed_after_open, 2);
+        apply_all(&mut b, &[msg(L, Body::Delete { order_ref: 5 })]);
+
         // A halted symbol isn't counted.
         apply_all(
             &mut b,
@@ -791,6 +848,6 @@ mod tests {
                 add(4, Side::Sell, 10, 980),
             ],
         );
-        assert_eq!(b.stats().crossed, [0, 2, 0]);
+        assert_eq!(b.stats().crossed, [0, 4, 0]);
     }
 }
