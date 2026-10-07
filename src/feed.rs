@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::book::Level;
 use crate::command::{Command, Event};
+use crate::hash::IdBuildHasher;
 use crate::types::{OrderId, Price, Qty, Side};
 
 /// One incremental market data message.
@@ -88,7 +89,8 @@ struct Taker {
 pub struct Publisher {
     bids: BTreeMap<Price, Level>,
     asks: BTreeMap<Price, Level>,
-    orders: HashMap<OrderId, Resting>,
+    /// Hashed with fmix64, like the fast book's index (D31).
+    orders: HashMap<OrderId, Resting, IdBuildHasher>,
     taker: Option<Taker>,
     /// Levels the current command changed, each with its state before the command.
     /// A `Vec` sorted at the end, not a map: the output order must not depend on hashing (D4).
@@ -139,7 +141,9 @@ impl Publisher {
         }
         if let Some(t) = self.taker.take() {
             if t.open > 0 {
-                let price = t.price.ok_or(format!("market order {} left open", t.id))?;
+                let price = t
+                    .price
+                    .ok_or_else(|| format!("market order {} left open", t.id))?;
                 self.rest(t.id, t.side, price, t.open)?;
             }
         }

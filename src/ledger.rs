@@ -106,7 +106,7 @@ impl Ledger {
                 let open = self
                     .open
                     .get_mut(&id)
-                    .ok_or(format!("modified {id}, which isn't open"))?;
+                    .ok_or_else(|| format!("modified {id}, which isn't open"))?;
                 *open = qty.0;
             }
             Event::Trade {
@@ -129,10 +129,10 @@ impl Ledger {
                     let open = self
                         .open
                         .get_mut(&id)
-                        .ok_or(format!("{event}: order {id} isn't open"))?;
+                        .ok_or_else(|| format!("{event}: order {id} isn't open"))?;
                     *open = open
                         .checked_sub(qty.0)
-                        .ok_or(format!("{event}: order {id} only had {open} open"))?;
+                        .ok_or_else(|| format!("{event}: order {id} only had {open} open"))?;
                 }
             }
             Event::Cancelled { id, remaining } => {
