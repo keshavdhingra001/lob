@@ -222,6 +222,20 @@ mod tests {
         assert_eq!(rx.pop(), None);
     }
 
+    /// The race `pop` re-checks for: the consumer finds the ring empty, then the producer
+    /// pushes its last item and closes, then the consumer sees `closed`. That item must still
+    /// come out. The window is a few ns wide, so this repeats a tiny hand-off many times.
+    #[test]
+    fn the_last_item_before_closing_is_never_lost() {
+        for _ in 0..20_000 {
+            let (mut tx, mut rx) = ring::<u8>(1);
+            std::thread::scope(|s| {
+                s.spawn(move || tx.push(7));
+                assert_eq!(rx.pop(), Some(7));
+            });
+        }
+    }
+
     /// Two threads, a small ring so it's constantly full and empty: every item arrives
     /// exactly once, in order. Items carry a check value, so a torn or stale slot shows.
     #[test]
