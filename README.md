@@ -3,7 +3,7 @@
 A limit order book and matching engine written from scratch in Rust: price-time priority
 matching, deterministic replay, and measured tail latency.
 
-> Work in progress: M0–M9 of the [roadmap](#roadmap) are done. [DESIGN.md](DESIGN.md) records every design decision.
+> Work in progress: M0–M10 of the [roadmap](#roadmap) are done. [DESIGN.md](DESIGN.md) records every design decision.
 
 ## Try it
 
@@ -43,6 +43,10 @@ digest   f0cd0c4be21b0c27
 The digest is the same on every run and every machine. It's pinned in the tests.
 
 ## What's built so far
+
+- **Property tests**: every codec round-trips and decodes only canonical bytes; decoders never panic on
+  random or edited bytes; a journal never returns a changed command; the two books agree on any session;
+  a consumer recovers from any loss pattern. Planted bugs shrink to counterexamples as small as 2 commands.
 
 - **Threaded pipeline**: a bounded single-producer single-consumer ring (cache-line-padded indices,
   cached opposite index, `Acquire`/`Release`), three threads, latency measured from a send schedule so
@@ -165,6 +169,6 @@ Details are in [DESIGN.md](DESIGN.md) (D45–D48, M9 results).
 - [x] **M7** Real market data: NASDAQ ITCH 5.0 parser, every symbol's book rebuilt from a sample day
 - [x] **M8** Market data out: L2 snapshots, incremental updates with sequence numbers, gap recovery
 - [x] **M9** Engine pipeline: gateway -> lock-free SPSC ring -> matching -> output ring
-- [ ] **M10** Fuzzing and property tests
+- [x] **M10** Property tests (proptest): codecs, journal damage, engine and feed
 - [ ] **M11** Benchmark report
 - [ ] **M12** Final design write-up

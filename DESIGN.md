@@ -977,3 +977,33 @@ bounded by proptest's defaults.
 ### D52: Properties are mutation-checked too
 The bugs planted in earlier milestones are planted again. Each must fail a property, and the shrunk counterexample is recorded. That checks that the
 properties have teeth, and it shows what shrinking buys over a seeded random test: a few commands instead of thousands.
+
+### M10 results (2026-10-07)
+**16 properties** (`tests/codecs.rs` 14, `tests/props.rs` 2). `cargo test` runs 256 cases each. Soak, release build, twice: `PROPTEST_CASES=100000` for the codecs
+(1.4M cases, 3.1 s) and `20000` for the engine and feed (40k sessions of up to 150 commands, about 10 s). Both passed. No real bug was found: the M1–M9 decoders were
+already strict. In particular, every payload a decoder accepts is the canonical encoding of what it decoded (no trailing bytes, no second spelling).
+
+**Mutation checks (D52):** 19 planted bugs, 9 in codecs and 5 in the fast book, plus re-checks. Codecs: 7 caught at once. The journal's torn-tail condition
+(`end == rest.len()` → `end + 1 >= rest.len()`) survived, which led to the D16 property "damage before the last record is an error". It now fails with this shrunk input:
+two all-zero limit orders, bit 0 of the first record's CRC flipped, and one byte of the second record left after the cut. ITCH `printable` (`== b'Y'` → `!= b'N'`)
+survives. It's equivalent on valid data, since the spec only allows `Y` or `N`.
+
+Shrunk counterexamples for the fast-book bugs (the reference book is correct, so each is the smallest session where the two books differ):
+
+| Planted bug | Shrunk to |
+|---|---|
+| a new bid beats the best if *lower* | 2 commands: `limit 1 buy 1 98`, `limit 2 buy 1 95 post` |
+| ids only need to be ≥ the last (not >) | 2 commands: the same `limit 1 buy 1 95` twice |
+| FOK needs *more* than its size available | 10 commands |
+| a resting post-only order forgets it's post-only (M2's survivor) | 10 commands, ending in a crossing `modify` of the post-only order |
+| a same-quantity, same-price modify loses priority | 22 commands |
+
+**What made shrinking work:** the first session strategy produced 4- to 27-command counterexamples full of `qty 0` limits that do nothing. That had two causes.
+Modify and cancel targets were absolute (`id % next`), so removing any earlier command re-pointed them and the failure vanished. And quantities shrink
+towards 0, which in this engine turns an order into a rejected no-op instead of removing it. Targets are now "the k-th most recent id", and
+alternatives are ordered so values shrink towards 1 (proptest shrinks a union towards its first branch). That cut the two simplest cases to 2 commands.
+It also made the generator better at *finding* bugs: the priority bug, which survived 256 cases with the first strategy, is now caught at 256, because relative
+targets hit live orders far more often. The filler left in the longer cases comes from proptest's vector shrinker, which tries removing each element only once.
+Commands that become removable only after other simplifications stay in.
+
+**Not done:** coverage-guided fuzzing (`cargo-fuzz` needs nightly; D49), and a stateful model test of the consumer's buffer with reordering (the link never reorders, D42).
