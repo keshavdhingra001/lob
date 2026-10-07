@@ -676,6 +676,16 @@ mod tests {
                 got: 35
             })
         );
+        let mut long = add.to_vec();
+        long.push(0);
+        assert_eq!(
+            decode(&long),
+            Err(DecodeError::BadLength {
+                kind: b'A',
+                expected: 36,
+                got: 37
+            })
+        );
         assert_eq!(decode(&[b'Z', 0]), Err(DecodeError::UnknownType(b'Z')));
         assert_eq!(decode(&[]), Err(DecodeError::Empty));
         let mut bad = add.to_vec();
