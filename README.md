@@ -45,6 +45,10 @@ The digest is the same on every run and every machine. It's pinned in the tests.
 
 ## What's built so far
 
+- **Zero-allocation hot path**: once warmed up, the fast book applies millions of commands without a
+  single heap allocation, proven by a counting allocator. Order ids must increase per session (as on
+  Nasdaq OUCH), price levels live in a tick-indexed ladder with a two-level bitmap, and the id
+  index uses a cheap MurmurHash3 finalizer.
 - **Latency measurement**: per-command p50 / p99 / p99.9 / max for each kind of command
   (`lob latency`, HdrHistogram), the clock's own cost reported alongside, runs that alternate
   between the books on a pinned core, and criterion microbenchmarks at fixed book depths.
@@ -90,12 +94,20 @@ Latency per cancel (`scripts/latency.sh`, release, one pinned laptop core, ns, i
 | Generated order flow, 2M commands | 106 / 179 | 49 / 106 |
 | One queue of 10,000 orders, cancelled in random order | 1,086 / 3,557 | 44 / 61 |
 
-Limit, market and reject latencies are the same in both books. Both books also show a worst case of
-several milliseconds: the set of used order ids rehashes as it grows. That's the next thing to remove
-([DESIGN.md](DESIGN.md), M5 results).
+Limit, market and reject latencies are the same in both books.
+
+After M6 (zero allocations, increasing ids, a price ladder), on the same 2M generated commands, fast book:
+
+| | M5 | M6 |
+|---|---|---|
+| p50 / p99, all commands | 57 / 297 ns | 42 / 186 ns |
+| Resting a limit order, p50 / p99 | 98 / 264 ns | 50 / 95 ns |
+| Worst case | 10 ms | 0.13 ms |
+| CPU cycles per command | 281 | 124 |
+
+The 10 ms worst case was a set of every order id ever used, rehashing as it grew. Details are in [DESIGN.md](DESIGN.md) (D30–D34, M6 results).
 
 ## Planned
 
-- Zero allocations on the hot path, and no multi-millisecond pauses.
 - Replay of a real NASDAQ ITCH session.
 - A lock-free pipeline between gateway, matching and market data threads.

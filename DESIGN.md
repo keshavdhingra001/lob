@@ -580,3 +580,88 @@ vs 44 / 61 / 144 for the fast book (58x at p99).
   searched on the wrong side), all caught after a fix. The `depth(n)` bug survived at first because every test asked for
   unlimited depth; the differential test now compares `depth(side, 0)` and `depth(side, 3)` too. A fourth planted change
   (`return true` past the FOK limit) behaved exactly like the original code, since every later level is past the limit as well, so it was replaced.
+
+### D32: Proof of zero allocations per command
+- **What:** `tests/alloc.rs` installs a counting `#[global_allocator]` that wraps `System`. It counts `alloc`, `alloc_zeroed` and
+  `realloc` in a thread-local `Cell`, which is `const`-initialised with no destructor, so counting can't itself allocate,
+  and parallel tests don't mix their counts.
+  - After 10,000 warm-up commands, the fast book must apply the next 990,000 with **zero** allocations.
+  - That's checked on three generated sessions, one of them with up to 200,000 live orders.
+  - The reference book runs in the same harness and must allocate more than 1,000 times, so the test can't pass because nothing was counted.
+- **`FastBook::with_capacity(config, orders)`** reserves the order and level slabs, their free lists and the
+  id index at startup, the way exchanges size their pools before the open. `with_config` is
+  `with_capacity(config, 0)`. The ladder windows are allocated by each side's first order, during warm-up.
+- **What made zero possible:**
+  - D30: no set that grows with every id
+  - D33: no `BTreeMap` node for each new price level
+  - the slab free lists (D19), and caller-owned event buffers (D5)
+- **What still allocates, by design:** prices outside the ladder window (the overflow tree), growth past the reserved
+  capacity, and `depth()` (it returns a `Vec`, and it's a query, not the matching path).
+- **Mutation-checked:** 3 planted bugs, all caught: no reservation (`with_config` in the test), the index not reserved, and a
+  `format!` hidden in `rest` (wrapped in `black_box` so the optimizer can't remove the allocation).
+
+### D34: Order and level layout, and the crossing-limit tail
+- **What:** `Node` (id, qty, level, prev, next, post-only) and `LevelNode` (price, side, head, tail,
+  total, count) are both 32 bytes, two per 64-byte cache line. Compile-time `assert!`s on `size_of`
+  make growing either one a deliberate change. No reordering was needed: the 1-byte fields
+  already pack into the padding.
+- **The crossing-limit tail (M5 result 3, D29), explained:** a scratch experiment timed sweeps that each fill 10 makers from one deep level,
+  with the makers' slab slots either *contiguous* (rested into a fresh slab) or *scattered* (the free list shuffled first, as it is in steady state).
+  The books alternated, median of 5, on a quiet machine (`taskset -c 2`, M6 code):
+
+  | Makers at one level | Slots | Reference ns per maker | Fast ns per maker |
+  |---|---|---|---|
+  | 200,000 | contiguous | 32.9 | 32.6 |
+  | 200,000 | scattered | 28.3 | **59.6** |
+  | 1,000,000 | contiguous | 72.0 | 81.4 |
+  | 1,000,000 | scattered | 76.1 | **157.5** |
+
+  When the nodes are contiguous, the fast book's extra bookkeeping per maker (links, level totals, free list) costs nothing at 200k and 13% at 1M.
+  When they're scattered, each maker is a cache miss the reference book's contiguous `VecDeque` doesn't pay.
+  **So it's memory layout, not work.**
+- **Not done (proposed):** prefetch the next maker's node while filling the current one (`_mm_prefetch`; `unsafe`
+  and x86-specific), or keep each level's nodes close together (one slab per level, or chunked allocation).
+  Both would need the same experiment to prove they help.
+
+### M6 results (2026-10-05, quiet machine: idle 90%, every clock floor 14–15 ns, `taskset -c 2`)
+**Fast book, M5 vs M6**, the same journals, the two binaries alternated, 2 runs each (both shown), ns. Each figure is the median of 5 runs.
+
+| Generated flow, 2M | M5 p50 | M5 p99 | M5 max | M6 p50 | M6 p99 | M6 max |
+|---|---|---|---|---|---|---|
+| limit-rest | 98 / 100 | 264 / 212 | 2.5 / 3.3 ms | **50 / 50** | **95 / 94** | 68 / 125 µs |
+| limit-cross | 68 / 67 | 530 / 502 | 5.2 / 6.5 ms | 43 / 44 | 372 / 368 | 126 / 125 µs |
+| market | 59 / 61 | 309 / 270 | 10.0 / 13.4 ms | 35 / 35 | 171 / 172 | 44 / 130 µs |
+| cancel | 55 / 56 | 125 / 118 | 0.1 / 0.02 ms | 47 / 48 | 71 / 72 | 24 / 25 µs |
+| modify | 66 / 66 | 209 / 203 | | 59 / 60 | 151 / 153 | |
+| **all** | 57 / 59 | 297 / 266 | **10.0 / 13.4 ms** | **42 / 42** | **186 / 186** | **126 / 130 µs** |
+
+| Deeper book (about 17,000 resting) | M5 p50 | M5 p99 | M5 max | M6 p50 | M6 p99 | M6 max |
+|---|---|---|---|---|---|---|
+| limit-rest | 103 / 104 | 270 / 275 | 2.6 / 2.4 ms | 54 / 53 | 100 / 93 | 0.23 / 0.25 ms |
+| limit-cross | 68 / 71 | 694 / 712 | 9.7 / 10.3 ms | 44 / 43 | 470 / 416 | 0.13 / 0.03 ms |
+| cancel | 74 / 74 | 283 / 273 | | 62 / 61 | 207 / 99 | |
+| **all** | 63 / 64 | 401 / 406 | **9.7 / 10.3 ms** | **42 / 41** | **256 / 234** | **0.23 / 0.25 ms** |
+
+**Counters** (`scripts/profile.sh`, per command, decode baseline subtracted), M5 (D29) to M6:
+
+| | cycles | instructions | branch misses | L1d misses | LLC misses |
+|---|---|---|---|---|---|
+| fast | 277–281 to **124** | 596 to **266** | 2.1 to 1.5 | 4.0 to 2.0 | 0.9 to **0.13** |
+| reference (it gained D30 too) | 329–365 to 227 | 660 to 419 | 2.9 to 2.8 | 5.6 to 3.3 | 1.0 to 0.13 |
+
+**Where the fast book's time goes now** (self time, including about 20% journal decoding and CRC that isn't matching):
+`apply` 17%, id index `remove` 15%, CRC 12%, `take` 11%, `submit` 9%, index `insert` 6%, `rest` 5%,
+`unlink` 5%, journal decoding 5%, `Ladder::get` 2%. No `BTreeMap` and no used-id set appear at all.
+
+**What the numbers say:**
+1. **The multi-ms worst case is gone:** 10–13 ms down to 0.13–0.25 ms in every run. That was the used-id set's rehash (D30). What's left
+   is the slab and index growing in `lob latency`, which uses `with_config` (no reserved capacity), plus OS interrupts.
+2. **2.2x fewer cycles per command** (281 to 124) and **7x fewer last-level cache misses** (0.9 to 0.13). Overall p50 is 57 down to 42 ns,
+   and about 14 ns of that is the clock floor, so the work itself went from about 43 ns to about 28 ns.
+3. **Resting an order is twice as fast** (p50 98 to 50, p99 264 to 95): no used-set insert, a cheaper index insert, and an array slot
+   instead of a tree lookup for the level.
+4. **The changes aren't measured one at a time.** This A/B compares M5 with all of D30, D31 and D33. The profile shows where
+   the time went (the used set gone, SipHash replaced, the tree gone), but not each change's share. Building one binary per decision would give that.
+5. **Criterion wasn't re-run for M6** (the session ended during it). That's still to do: `taskset -c 2 cargo bench --bench book` on a quiet machine.
+6. **The id index is now the biggest single matching cost** (21% for insert plus remove). With increasing ids (D30) a
+   direct-mapped table would fit, if ids were dense. Real client ids have gaps, so that's a Tier 3 gateway question.
