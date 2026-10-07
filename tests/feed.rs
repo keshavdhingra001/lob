@@ -227,10 +227,12 @@ fn a_consumer_recovers_from_loss_and_duplicates() {
 }
 
 #[test]
-fn a_lossless_link_needs_no_snapshot() {
+fn duplicates_alone_need_no_snapshot() {
     let (stats, checked) = lossy(1, random(1, 3_000, 1), Consumer::new(), 0);
     assert_eq!((stats.gaps, stats.snapshots), (0, 0));
     assert_eq!(checked, 3_000);
+    // With no snapshots, every duplicate is one the link sent twice.
+    assert!(stats.duplicates > 50, "{stats:?}");
 }
 
 #[test]
