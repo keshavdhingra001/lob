@@ -948,3 +948,32 @@ Fixes, not done: move items in batches (one index store per command, not per eve
   only slowly, and p99 jumped from about 0.1 ms to 2.8 ms. With actual-send stamps, this run would have looked almost as good as the others.
 - **Mutation checks:** 11 planted bugs in `ring.rs` and `pipeline.rs`. Weakening `Acquire`/`Release` to `Relaxed` (2 mutants) survives, as D45
   predicts. The final re-check in `pop` survived until a stress test of 20,000 one-item hand-offs was added, which now catches it 3 runs out of 3.
+
+### D49: proptest on stable, not cargo-fuzz (M10)
+- **What:** `proptest` (dev-dependency, default features off except `std`) generates inputs from strategies and, on failure,
+  *shrinks* them to a minimal counterexample. Failing seeds are saved under `proptest-regressions/` and committed, so a found bug
+  is replayed on every later run.
+- **Alternatives:** `cargo-fuzz` (libFuzzer) is coverage-guided: it learns which inputs reach new branches, so it finds deep parser
+  bugs that random generation misses. It needs nightly Rust, which isn't installed here (the owner decides). `quickcheck` is similar to proptest,
+  but its shrinking is per type rather than per strategy, and it's less maintained.
+- **Making up for no coverage feedback:** byte inputs aren't only random. Most start from a *valid* encoding and then flip, truncate, insert or
+  overwrite bytes, so they get past the first length or tag check and exercise the deeper paths.
+
+### D50: What the properties are
+- **Codecs round-trip** for every value of every field: the text command format, the journal record, the event record (fixed sizes), feed messages and
+  snapshots, and every decoded ITCH type.
+- **Decoders never panic** on any bytes, and say exactly how many bytes they consumed: `decode_command`, `read_journal`, `feed::decode`,
+  `decode_snapshot`, `itch::decode` and the ITCH `Reader` over a stream, and `Command::from_str` on any string.
+- **The journal never lies:** for any commands, any cut point and any single flipped bit, `read_journal` either fails or returns a
+  *prefix* of what was written. If it reports no torn tail, the prefix is everything.
+- **The engine:** for any session (narrow prices and small quantities, so trades are common), the reference and fast books emit identical events.
+  Both books keep their invariants, and the ledger balances, after every command.
+- **The feed:** for any session and any pattern of lost messages, a consumer that gets a snapshot whenever it asks for one ends with the engine's book.
+
+### D51: Case counts
+`cargo test` runs proptest's default of 256 cases per property, which takes seconds. A soak run sets `PROPTEST_CASES` (results below). Shrinking is
+bounded by proptest's defaults.
+
+### D52: Properties are mutation-checked too
+The bugs planted in earlier milestones are planted again. Each must fail a property, and the shrunk counterexample is recorded. That checks that the
+properties have teeth, and it shows what shrinking buys over a seeded random test: a few commands instead of thousands.
