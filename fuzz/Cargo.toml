@@ -1,0 +1,44 @@
+[package]
+name = "lob-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+lob = { path = ".." }
+
+# Not part of the main workspace: it builds only on nightly, with `cargo +nightly fuzz`.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "journal"
+path = "fuzz_targets/journal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "feed"
+path = "fuzz_targets/feed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "itch"
+path = "fuzz_targets/itch.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "text"
+path = "fuzz_targets/text.rs"
+test = false
+doc = false
+bench = false

@@ -227,7 +227,10 @@ mod tests {
     /// come out. The window is a few ns wide, so this repeats a tiny hand-off many times.
     #[test]
     fn the_last_item_before_closing_is_never_lost() {
-        for _ in 0..20_000 {
+        // Miri (D64) interprets every instruction and picks thread switches itself, so far
+        // fewer repetitions still cover the race there.
+        let reps = if cfg!(miri) { 20 } else { 20_000 };
+        for _ in 0..reps {
             let (mut tx, mut rx) = ring::<u8>(1);
             std::thread::scope(|s| {
                 s.spawn(move || tx.push(7));
@@ -241,7 +244,7 @@ mod tests {
     #[test]
     fn threads_see_every_item_in_order() {
         for cap in [1, 2, 8] {
-            let n = 200_000u64;
+            let n: u64 = if cfg!(miri) { 500 } else { 200_000 };
             let (mut tx, mut rx) = ring::<(u64, u64)>(cap);
             let producer = std::thread::spawn(move || {
                 for i in 0..n {
