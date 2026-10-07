@@ -11,7 +11,7 @@ clients ──> gateway thread ──SPSC ring──> matching thread ──SPSC
                                            pure, deterministic             command journal (replay)
 ```
 
-Today (M5): two books behind the `OrderBook` trait: the reference book (D8), matching by D9 with modify
+Since M8, a publisher turns the events into an L2 feed (D40–D44). Before that (M5): two books behind the `OrderBook` trait: the reference book (D8), matching by D9 with modify
 (D11), IOC/FOK/post-only (D12) and instrument rules (D14). Checked by scenario scripts, an
 invariant checker (D10) and an event-only conservation ledger over random sessions (D13).
 Input is recorded in a binary journal (D15, D16); replay produces a sequenced event stream and a
@@ -844,3 +844,28 @@ flags: bit 0 side (0 buy / 1 sell; the aggressor's for a trade), bit 1 last mess
 - **CLI:** `lob feed <journal> [drop-percent] [seed]` prints message and byte counts, the digest, gaps and recoveries,
   and times the publisher against applying the commands alone.
 - **Not in M8:** a feed from the ITCH day (one per symbol, from `ItchBook`). It's a follow-up if wanted.
+
+### M8 results (2026-10-07, `lob feed`, 2M generated commands from `lob gen 1 2000000`, quiet machine, `taskset -c 2`, i7-1165G7)
+- **Feed size:** 1,249,419 level updates and 694,144 trades: 55.5 MB, **27.8 bytes per command**. Digest `aeb1c067880da1dd`, the same from both books
+  (the tests pin a 20k-command digest).
+- **Publisher cost**, best of 5, two rounds, alternating with apply-only runs:
+
+  | | apply only | apply + publish + encode | publisher |
+  |---|---|---|---|
+  | first version (SipHash index, an error string built per command) | 28.8 / 29.0 ns | 118.1 / 118.7 ns | +89 ns |
+  | fmix64 index (D31), error strings built only on error | 30.0 / 30.1 ns | 100.0 / 100.1 ns | **+70 ns** |
+
+  `perf record` found the second fix: `ok_or(format!(..))` builds its argument eagerly, so every command with a taker
+  formatted an error message it then threw away (`fmt::write` and `format_inner` were about 4% of samples). The ledger had the same pattern
+  in three places, now fixed too. The hasher alone was worth about 5 ns.
+- **The publisher costs over twice what matching does** (70 ns vs 30 ns). Most of it is the `BTreeMap` per side (`touch` and the
+  level lookups at the end) and sorting the touched levels. That's the price of D40's choice to stay outside the engine.
+  A ladder like the fast book's (D33) would remove the tree. Having the book report level changes (alternative (a)) would remove the second
+  copy of the book altogether. Neither is needed for correctness; both are options if the feed must keep up with the engine on one core.
+- **Recovery at 1% loss** (5% duplicates, seed 1): 19,030 gaps, each healed by one snapshot. 105k duplicates ignored. The final book
+  matches the engine's. 92.4 MB was delivered, against 58.3 MB with no loss. About 35 MB of that is snapshots, roughly 1.8 KB each (about 90 levels).
+  Full-depth snapshots are the expensive part of loss, which is why real feeds send them on a separate channel and let a recovering
+  consumer pick one up rather than asking for one per gap.
+- **Mutation checks:** 24 planted bugs across `feed.rs` and `consumer.rs`. 4 survived at first: a check that couldn't fire (removed), the
+  maker-price check (test added), the link's duplicates (test added), and one equivalent mutant left as it is: not trimming the already
+  replayed part of the buffer only wastes memory, since the next snapshot skips those messages anyway.

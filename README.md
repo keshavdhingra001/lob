@@ -3,7 +3,7 @@
 A limit order book and matching engine written from scratch in Rust: price-time priority
 matching, deterministic replay, and measured tail latency.
 
-> Work in progress: M0–M7 of the [roadmap](#roadmap) are done. [DESIGN.md](DESIGN.md) records every design decision.
+> Work in progress: M0–M8 of the [roadmap](#roadmap) are done. [DESIGN.md](DESIGN.md) records every design decision.
 
 ## Try it
 
@@ -43,6 +43,10 @@ digest   f0cd0c4be21b0c27
 The digest is the same on every run and every machine. It's pinned in the tests.
 
 ## What's built so far
+
+- **Market data out**: an L2 feed built from the engine's events, coalesced per command so a
+  consumer never sees a half-applied sweep, with sequence numbers, heartbeats and full-depth snapshots. A consumer
+  detects gaps, buffers, and resumes from a snapshot plus its buffer.
 
 - **Zero-allocation hot path**: once warmed up, the fast book applies millions of commands without a
   single heap allocation, proven by a counting allocator. Order ids must increase per session (as on
@@ -119,6 +123,20 @@ M7 replays a real NASDAQ TotalView-ITCH 5.0 day (30 July 2019, 282M messages) an
 `lob itch <file> [frame|decode|book|dump] [symbol]`. The sample files are at emi.nasdaq.com/ITCH and aren't in the repo.
 Details are in [DESIGN.md](DESIGN.md) (D35–D39, M7 results).
 
+M8 publishes market data from the engine's events: level updates (each level's new total, sent once per command),
+trades, sequence numbers, heartbeats, and full-depth snapshots. A consumer detects gaps and recovers from a snapshot plus the
+messages it buffered. On the same 2M generated commands:
+
+| | |
+|---|---|
+| Feed | 1.25M level updates + 0.69M trades, 27.8 bytes per command |
+| Cost on top of matching | +70 ns per command (matching alone: 30 ns) |
+| 1% loss, 5% duplicates | 19,030 gaps, each healed by one snapshot; the final book matches the engine's |
+
+Every command's updates are checked to be exactly the change in the book's depth, on both books, and a consumer on a
+lossy link is checked never to show a book the engine didn't have. `lob feed <journal> [drop-percent] [seed]`.
+Details are in [DESIGN.md](DESIGN.md) (D40–D44, M8 results).
+
 ## Roadmap
 
 - [x] **M0** Scaffold: command/event model, text format, `OrderBook` trait, REPL
@@ -129,7 +147,7 @@ Details are in [DESIGN.md](DESIGN.md) (D35–D39, M7 results).
 - [x] **M5** Latency measurement: per-command histograms, criterion, `perf`
 - [x] **M6** Zero allocations per command, tick-indexed price ladder, cache-line layout
 - [x] **M7** Real market data: NASDAQ ITCH 5.0 parser, every symbol's book rebuilt from a sample day
-- [ ] **M8** Market data out: L1/L2 snapshots, incremental updates with sequence numbers, gap recovery
+- [x] **M8** Market data out: L2 snapshots, incremental updates with sequence numbers, gap recovery
 - [ ] **M9** Engine pipeline: gateway -> lock-free SPSC ring -> matching -> output ring
 - [ ] **M10** Fuzzing and property tests
 - [ ] **M11** Benchmark report
