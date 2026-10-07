@@ -7,20 +7,27 @@
 # Each part first waits for a quiet machine (scripts/quiet.sh). Single-thread parts are
 # pinned to `cpu`; the pipeline gets `cpu-1,cpu,cpu+1` (three physical cores on a 4-core,
 # 8-thread laptop where cpu n and n+4 share a core). Without the ITCH file, the ITCH parts
-# are skipped. A full run takes about 30 minutes.
+# are skipped. A full run takes about 15 minutes.
+#
+# To redo parts that something disturbed, into an existing results folder:
+#   OUT=bench/results/<date-time> ONLY="latency-gen2m criterion" scripts/report.sh
+# Their new output is appended after the old, so both stay on record.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 cpu="${1:-2}"
 itch="${2:-data/07302019.NASDAQ_ITCH50}"
 export TMPDIR="$PWD/target/tmp"
-out="bench/results/$(date +%F-%H%M)"
+out="${OUT:-bench/results/$(date +%F-%H%M)}"
+only="${ONLY:-}"
 mkdir -p "$TMPDIR" target/latency "$out"
 
+# Build everything first: a build uses every core, and must not overlap a measurement.
 cargo build --release -q
+cargo bench -q --bench book --no-run 2>/dev/null
 lob=target/release/lob
 
 # What every number was measured on (D55).
-{
+[ -n "$only" ] || {
   echo "date     $(date -Is)"
   echo "commit   $(git rev-parse --short HEAD)$(git diff --quiet HEAD -- src benches scripts Cargo.toml || echo ' (modified)')"
   echo "rustc    $(rustc -V)"
@@ -31,7 +38,7 @@ lob=target/release/lob
   echo "memory   $(free -g | awk '/Mem:/ {print $2 " GB"}')"
   echo "pinned   cpu $cpu (SMT siblings: $(cat /sys/devices/system/cpu/cpu"$cpu"/topology/thread_siblings_list 2>/dev/null || echo '?'))"
 } > "$out/machine.txt"
-cat "$out/machine.txt"
+[ -n "$only" ] || cat "$out/machine.txt"
 
 # Wait for a quiet machine, and record how quiet it was in the part's file.
 quiet() {
@@ -42,9 +49,13 @@ quiet() {
 part() {
   local name="$1"
   shift
+  if [ -n "$only" ] && [[ " $only " != *" $name "* ]]; then
+    return 0
+  fi
   echo "== $name: $*" | tee -a "$out/$name.txt"
   quiet "$out/$name.txt"
   "$@" >> "$out/$name.txt" 2>&1
+  # A load average well above 1 here means something else ran during the part.
   echo "uptime: $(uptime)" >> "$out/$name.txt"
 }
 
@@ -56,7 +67,9 @@ journals=(gen2m deep200k queue10k)
 if [ -f "$itch" ]; then
   for s in AAPL SPY; do
     j=$(echo "$s" | tr 'A-Z' 'a-z')
-    part translate $lob itch "$itch" journal "$s" "target/latency/$j.jrnl"
+    if [ -z "$only" ] || [ ! -f "target/latency/$j.jrnl" ]; then
+      part translate $lob itch "$itch" journal "$s" "target/latency/$j.jrnl"
+    fi
     journals+=("$j")
   done
 else
