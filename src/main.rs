@@ -8,6 +8,7 @@
 //! lob gen-queue <orders> <journal>      worst case: one deep queue, cancelled in random order
 //! lob latency <journal> [runs]          per-command latency percentiles for both books
 //! lob run <ref|fast|none> <journal> [repeats]   apply only, no timing: for `perf stat` (D29)
+//! lob feed <journal> [drop-percent] [seed]   publish market data; recover over a lossy link (D40–D44)
 //! lob itch <file[.gz]> [frame|decode|book|dump] [symbol]   replay a NASDAQ ITCH 5.0 day (D36–D39)
 //! ```
 
@@ -45,6 +46,9 @@ usage:
                                         (runs: default 5; pin it with `taskset -c <cpu>`)
   lob run <ref|fast|none> <journal> [repeats]   apply only, nothing timed or printed per command,
                                         for `perf stat`; `none` only decodes (the baseline)
+  lob feed <journal> [drop-percent] [seed]   publish the journal's market data: messages, bytes,
+                                        digest, the publisher's cost, and a consumer recovering
+                                        over a link that drops (default 1%) and duplicates (5%)
   lob itch <file[.gz]> [frame|decode|book|dump] [symbol]   replay a NASDAQ ITCH 5.0 file: frame
                                         only, frame + decode, or rebuild every book (default), and
                                         print messages/s; `book` also prints the symbol's depth at
@@ -66,6 +70,9 @@ fn main() -> ExitCode {
         ["run", book, path, repeats] => run(book, path, repeats),
         ["latency", path] => latency(path, "5"),
         ["latency", path, runs] => latency(path, runs),
+        ["feed", path] => feed(path, "1", "1"),
+        ["feed", path, drop] => feed(path, drop, "1"),
+        ["feed", path, drop, seed] => feed(path, drop, seed),
         ["itch", path] => itch_replay(path, "book", "AAPL"),
         ["itch", path, mode] => itch_replay(path, mode, "AAPL"),
         ["itch", path, mode, symbol] => itch_replay(path, mode, symbol),
@@ -276,6 +283,101 @@ fn run(book: &str, path: &str, repeats: &str) -> Result<(), String> {
         "{} commands x {repeats}: {events} events",
         journal.commands.len()
     );
+    Ok(())
+}
+
+/// Publish a journal's market data (D40–D44): message and byte counts and the feed's digest,
+/// the publisher's cost (best of 5, alternating with apply-only runs), and a consumer
+/// recovering over a lossy link, checked against the engine's book at the end.
+fn feed(path: &str, drop_pct: &str, seed: &str) -> Result<(), String> {
+    use lob::consumer::{Consumer, Link};
+    use lob::feed::{self, Msg, Publisher};
+    use lob::replay::Fnv64;
+    use std::time::Instant;
+
+    let drop_pct: u64 = parse_arg("drop percent", drop_pct)?;
+    if drop_pct > 100 {
+        return Err(format!("drop percent {drop_pct} is over 100"));
+    }
+    let seed = parse_arg("seed", seed)?;
+    let journal = load_journal(path)?;
+    let commands = &journal.commands;
+    let n = commands.len() as f64;
+
+    // Apply + publish + encode: everything a feed handler does before the network.
+    let publish = |bytes: &mut Vec<u8>| -> Result<(u64, u64, u64), String> {
+        let mut book = FastBook::new();
+        let mut publisher = Publisher::new();
+        let (mut events, mut msgs) = (Vec::with_capacity(64), Vec::with_capacity(64));
+        let (mut levels, mut trades, mut hash) = (0, 0, Fnv64::default());
+        for cmd in commands {
+            events.clear();
+            msgs.clear();
+            book.apply(cmd, &mut events);
+            publisher.on_command(cmd, &events, &mut msgs)?;
+            bytes.clear();
+            for msg in &msgs {
+                match msg {
+                    Msg::Level { .. } => levels += 1,
+                    Msg::Trade { .. } => trades += 1,
+                }
+                feed::encode(msg, bytes);
+            }
+            hash.update(bytes);
+        }
+        Ok((levels, trades, hash.finish()))
+    };
+    let (mut apply_best, mut publish_best) = (f64::MAX, f64::MAX);
+    let mut bytes = Vec::with_capacity(4096);
+    let mut counts = (0, 0, 0);
+    for _ in 0..5 {
+        let start = Instant::now();
+        apply_all(&mut FastBook::new(), commands);
+        apply_best = apply_best.min(start.elapsed().as_secs_f64());
+        let start = Instant::now();
+        counts = publish(&mut bytes)?;
+        publish_best = publish_best.min(start.elapsed().as_secs_f64());
+    }
+    let (levels, trades, digest) = counts;
+    let total_bytes = levels * feed::LEVEL_LEN as u64 + trades * feed::TRADE_LEN as u64;
+    println!(
+        "{} commands: {levels} level updates, {trades} trades, {total_bytes} bytes ({:.1} per command)",
+        commands.len(),
+        total_bytes as f64 / n
+    );
+    println!("digest   {digest:016x}");
+    println!(
+        "fast book, best of 5: apply {:.1} ns/command, apply + publish + encode {:.1} ns/command (+{:.1})",
+        apply_best / n * 1e9,
+        publish_best / n * 1e9,
+        (publish_best - apply_best) / n * 1e9
+    );
+
+    let mut book = FastBook::new();
+    let mut publisher = Publisher::new();
+    let mut consumer = Consumer::new();
+    let mut link = Link::new(seed, drop_pct, 5);
+    let (mut events, mut msgs) = (Vec::new(), Vec::new());
+    for cmd in commands {
+        events.clear();
+        msgs.clear();
+        book.apply(cmd, &mut events);
+        publisher.on_command(cmd, &events, &mut msgs)?;
+        link.deliver(&publisher, &msgs, &mut consumer);
+    }
+    link.settle(&publisher, &mut consumer);
+    let s = consumer.stats();
+    println!(
+        "link (drop {drop_pct}%, duplicate 5%, seed {seed}): {} gaps, {} snapshots, {} duplicates ignored, {} bytes delivered",
+        s.gaps, s.snapshots, s.duplicates, link.bytes
+    );
+    let same = [lob::Side::Buy, lob::Side::Sell]
+        .iter()
+        .all(|&side| consumer.depth(side, usize::MAX) == book.depth(side, usize::MAX));
+    if !same {
+        return Err("the consumer's final book differs from the engine's".to_string());
+    }
+    println!("consumer's final book matches the engine's");
     Ok(())
 }
 
