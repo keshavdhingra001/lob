@@ -317,6 +317,33 @@ proptest! {
         }
     }
 
+    /// D16: damage to any record but the last is an error, never a torn tail, even when
+    /// the last record is itself cut short. (The length field is left alone: a longer length
+    /// runs past the end and really is indistinguishable from a torn write.)
+    #[test]
+    fn damage_before_the_last_record_is_an_error(
+        commands in prop::collection::vec(command(), 1..8),
+        k in any::<prop::sample::Index>(),
+        at in any::<prop::sample::Index>(),
+        bit in 0..8u8,
+        extra in any::<prop::sample::Index>(),
+    ) {
+        let mut bytes = journal(&commands);
+        let ends = record_ends(&commands);
+        let k = k.index(commands.len());
+        let start = if k == 0 { 8 } else { ends[k - 1] };
+        // The record's CRC (4 bytes) or payload (after the 2-byte length).
+        let offsets: Vec<usize> = (start..start + 4).chain(start + 6..ends[k]).collect();
+        bytes[offsets[at.index(offsets.len())]] ^= 1 << bit;
+        let after = bytes.len() - ends[k];
+        prop_assume!(after > 0);
+        let cut = ends[k] + 1 + extra.index(after);
+        prop_assert_eq!(
+            read_journal(&bytes[..cut]),
+            Err(lob::journal::JournalError::Corrupt(start as u64))
+        );
+    }
+
     #[test]
     fn journals_never_panic(bytes in near((prop::collection::vec(command(), 0..4)).prop_map(|c| journal(&c)))) {
         let _ = read_journal(&bytes);
