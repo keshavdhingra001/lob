@@ -15,24 +15,28 @@ const CONFIG: BookConfig = BookConfig {
     max_qty: 12,
 };
 
-/// Which id a new order gets: the next fresh one, or an older one (rejected as not increasing).
+/// Which id a new order gets: the next fresh one, or the k-th most recent one (rejected as
+/// not increasing).
 #[derive(Clone, Copy, Debug)]
 enum NewId {
     Fresh,
-    Old(u64),
+    Recent(u64),
 }
 
 #[derive(Clone, Copy, Debug)]
 enum Op {
     Limit(NewId, Side, u64, i64, TimeInForce),
     Market(NewId, Side, u64),
-    /// Targets are any id used so far (or one past), so some are unknown or finished.
+    /// Targets are the k-th most recent id (0: the latest), so some are finished or were
+    /// never accepted. Relative targets keep their meaning when shrinking removes an
+    /// earlier operation, which absolute ids wouldn't.
     Modify(u64, u64, i64),
     Cancel(u64),
 }
 
 fn op() -> impl Strategy<Value = Op> {
-    let new_id = prop_oneof![9 => Just(NewId::Fresh), 1 => any::<u64>().prop_map(NewId::Old)];
+    // proptest shrinks a union towards its first branch, so the common case comes first.
+    let new_id = prop_oneof![9 => Just(NewId::Fresh), 1 => (0..4u64).prop_map(NewId::Recent)];
     let side = prop_oneof![Just(Side::Buy), Just(Side::Sell)];
     let tif = prop_oneof![
         6 => Just(TimeInForce::Gtc),
@@ -40,14 +44,17 @@ fn op() -> impl Strategy<Value = Op> {
         1 => Just(TimeInForce::Fok),
         1 => Just(TimeInForce::PostOnly),
     ];
-    // Quantities up to 13 (12 is the max, 0 is rejected); prices around 100.
-    let (qty, price) = (0..14u64, 95..106i64);
+    // Quantities up to 13 (12 is the max); 0 (rejected) is rare and last, so shrinking
+    // makes orders smaller rather than turning them into rejects. Prices around 100.
+    let qty = prop_oneof![12 => 1..14u64, 1 => Just(0u64)];
+    let price = 95..106i64;
+    let target = 0..8u64;
     prop_oneof![
         5 => (new_id.clone(), side.clone(), qty.clone(), price.clone(), tif)
             .prop_map(|(i, s, q, p, t)| Op::Limit(i, s, q, p, t)),
         1 => (new_id, side, qty.clone()).prop_map(|(i, s, q)| Op::Market(i, s, q)),
-        2 => (any::<u64>(), qty, price).prop_map(|(t, q, p)| Op::Modify(t, q, p)),
-        2 => any::<u64>().prop_map(Op::Cancel),
+        2 => (target.clone(), qty, price).prop_map(|(t, q, p)| Op::Modify(t, q, p)),
+        2 => target.prop_map(Op::Cancel),
     ]
 }
 
@@ -57,8 +64,13 @@ fn new_id(id: NewId, next: &mut u64) -> OrderId {
             *next += 1;
             OrderId(*next - 1)
         }
-        NewId::Old(i) => OrderId(1 + i % *next),
+        NewId::Recent(k) => recent(k, *next),
     }
+}
+
+/// The k-th most recent id handed out (0 is the latest); id 0, never used, before any.
+fn recent(k: u64, next: u64) -> OrderId {
+    OrderId(next - 1 - k % next)
 }
 
 fn session(ops: &[Op]) -> Vec<Command> {
@@ -79,12 +91,12 @@ fn session(ops: &[Op]) -> Vec<Command> {
                 qty: Qty(qty),
             },
             Op::Modify(t, qty, price) => Command::Modify {
-                id: OrderId(1 + t % next),
+                id: recent(t, next),
                 qty: Qty(qty),
                 price: Price(price),
             },
             Op::Cancel(t) => Command::Cancel {
-                id: OrderId(1 + t % next),
+                id: recent(t, next),
             },
         });
     }
