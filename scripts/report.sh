@@ -11,7 +11,8 @@
 #
 # To redo parts that something disturbed, into an existing results folder:
 #   OUT=bench/results/<date-time> ONLY="latency-gen2m criterion" scripts/report.sh
-# Their new output is appended after the old, so both stay on record.
+# Their new output is appended after the old, so both stay on record. Without OUT, ONLY
+# measures just those parts into a new folder (M12's latency plots were made that way).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 cpu="${1:-2}"
@@ -26,8 +27,8 @@ cargo build --release -q
 cargo bench -q --bench book --no-run 2>/dev/null
 lob=target/release/lob
 
-# What every number was measured on (D55).
-[ -n "$only" ] || {
+# What every number was measured on (D55). A folder gets this once, from its first run.
+[ -f "$out/machine.txt" ] || {
   echo "date     $(date -Is)"
   echo "commit   $(git rev-parse --short HEAD)$(git diff --quiet HEAD -- src benches scripts Cargo.toml || echo ' (modified)')"
   echo "rustc    $(rustc -V)"
@@ -38,7 +39,6 @@ lob=target/release/lob
   echo "memory   $(free -g | awk '/Mem:/ {print $2 " GB"}')"
   echo "pinned   cpu $cpu (SMT siblings: $(cat /sys/devices/system/cpu/cpu"$cpu"/topology/thread_siblings_list 2>/dev/null || echo '?'))"
 } > "$out/machine.txt"
-[ -n "$only" ] || cat "$out/machine.txt"
 
 # Wait for a quiet machine, and record how quiet it was in the part's file.
 quiet() {
@@ -80,7 +80,15 @@ for j in "${journals[@]}"; do
   part throughput taskset -c "$cpu" $lob bench "target/latency/$j.jrnl"
 done
 for j in "${journals[@]}"; do
-  part "latency-$j" taskset -c "$cpu" $lob latency "target/latency/$j.jrnl" 5
+  part "latency-$j" taskset -c "$cpu" $lob latency "target/latency/$j.jrnl" 5 "$out/hgrm/$j"
+done
+# Percentile plots of the latency parts that ran (D60). Drawing needs no quiet machine.
+for j in "${journals[@]}"; do
+  h="$out/hgrm/$j"
+  if [ -f "$h/fast.hgrm" ]; then
+    $lob plot "$out/latency-$j.svg" "$j: latency per command, median-p99 run of 5" \
+      "reference book=$h/ref.hgrm" "fast book=$h/fast.hgrm" "clock floor=$h/clock.hgrm"
+  fi
 done
 for j in gen2m aapl spy; do
   [ -f "target/latency/$j.jrnl" ] && part feed taskset -c "$cpu" $lob feed "target/latency/$j.jrnl"
