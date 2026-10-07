@@ -3,7 +3,7 @@
 A limit order book and matching engine written from scratch in Rust: price-time priority
 matching, deterministic replay, and measured tail latency.
 
-> Work in progress: M0–M8 of the [roadmap](#roadmap) are done. [DESIGN.md](DESIGN.md) records every design decision.
+> Work in progress: M0–M9 of the [roadmap](#roadmap) are done. [DESIGN.md](DESIGN.md) records every design decision.
 
 ## Try it
 
@@ -43,6 +43,10 @@ digest   f0cd0c4be21b0c27
 The digest is the same on every run and every machine. It's pinned in the tests.
 
 ## What's built so far
+
+- **Threaded pipeline**: a bounded single-producer single-consumer ring (cache-line-padded indices,
+  cached opposite index, `Acquire`/`Release`), three threads, latency measured from a send schedule so
+  stalls can't hide (coordinated omission), and output checked byte for byte against one thread.
 
 - **Market data out**: an L2 feed built from the engine's events, coalesced per command so a
   consumer never sees a half-applied sweep, with sequence numbers, heartbeats and full-depth snapshots. A consumer
@@ -137,6 +141,18 @@ Every command's updates are checked to be exactly the change in the book's depth
 lossy link is checked never to show a book the engine didn't have. `lob feed <journal> [drop-percent] [seed]`.
 Details are in [DESIGN.md](DESIGN.md) (D40–D44, M8 results).
 
+M9 runs the engine as three threads, gateway -> matching -> output, joined by a hand-written lock-free SPSC ring. Its output is
+byte-identical to one thread. On the same 2M commands, three physical cores of a laptop:
+
+| | ring | `std::sync::mpsc` |
+|---|---|---|
+| End-to-end p50 / p99 at 1M commands/s (latency from the schedule) | 0.82 / 15.9 µs | 4.3 / 55 µs |
+| Throughput, flooding (one thread: 5.0 M/s) | 3.9 M/s | 3.6 M/s |
+
+At full load three threads are *slower* than one: the output stage (hashing and market data) is about 165 of the 200 ns per
+command, so splitting off matching saves little and the hand-offs between cores cost more. `lob pipeline <journal> [rate] [ring|mpsc]`.
+Details are in [DESIGN.md](DESIGN.md) (D45–D48, M9 results).
+
 ## Roadmap
 
 - [x] **M0** Scaffold: command/event model, text format, `OrderBook` trait, REPL
@@ -148,7 +164,7 @@ Details are in [DESIGN.md](DESIGN.md) (D40–D44, M8 results).
 - [x] **M6** Zero allocations per command, tick-indexed price ladder, cache-line layout
 - [x] **M7** Real market data: NASDAQ ITCH 5.0 parser, every symbol's book rebuilt from a sample day
 - [x] **M8** Market data out: L2 snapshots, incremental updates with sequence numbers, gap recovery
-- [ ] **M9** Engine pipeline: gateway -> lock-free SPSC ring -> matching -> output ring
+- [x] **M9** Engine pipeline: gateway -> lock-free SPSC ring -> matching -> output ring
 - [ ] **M10** Fuzzing and property tests
 - [ ] **M11** Benchmark report
 - [ ] **M12** Final design write-up

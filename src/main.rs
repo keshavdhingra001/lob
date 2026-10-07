@@ -9,6 +9,7 @@
 //! lob latency <journal> [runs]          per-command latency percentiles for both books
 //! lob run <ref|fast|none> <journal> [repeats]   apply only, no timing: for `perf stat` (D29)
 //! lob feed <journal> [drop-percent] [seed]   publish market data; recover over a lossy link (D40–D44)
+//! lob pipeline <journal> [rate] [ring|mpsc] [capacity]   three threads vs one (D45–D48)
 //! lob itch <file[.gz]> [frame|decode|book|dump] [symbol]   replay a NASDAQ ITCH 5.0 day (D36–D39)
 //! ```
 
@@ -49,6 +50,10 @@ usage:
   lob feed <journal> [drop-percent] [seed]   publish the journal's market data: messages, bytes,
                                         digest, the publisher's cost, and a consumer recovering
                                         over a link that drops (default 1%) and duplicates (5%)
+  lob pipeline <journal> [rate] [ring|mpsc] [capacity]   gateway -> matching -> output threads
+                                        against the same work on one thread: throughput, end-to-end
+                                        latency, digests; rate 0 (default) floods, otherwise
+                                        commands/s on a schedule; capacity default 1024
   lob itch <file[.gz]> [frame|decode|book|dump] [symbol]   replay a NASDAQ ITCH 5.0 file: frame
                                         only, frame + decode, or rebuild every book (default), and
                                         print messages/s; `book` also prints the symbol's depth at
@@ -73,6 +78,10 @@ fn main() -> ExitCode {
         ["feed", path] => feed(path, "1", "1"),
         ["feed", path, drop] => feed(path, drop, "1"),
         ["feed", path, drop, seed] => feed(path, drop, seed),
+        ["pipeline", path] => pipeline(path, "0", "ring", "1024"),
+        ["pipeline", path, rate] => pipeline(path, rate, "ring", "1024"),
+        ["pipeline", path, rate, channel] => pipeline(path, rate, channel, "1024"),
+        ["pipeline", path, rate, channel, cap] => pipeline(path, rate, channel, cap),
         ["itch", path] => itch_replay(path, "book", "AAPL"),
         ["itch", path, mode] => itch_replay(path, mode, "AAPL"),
         ["itch", path, mode, symbol] => itch_replay(path, mode, symbol),
@@ -378,6 +387,67 @@ fn feed(path: &str, drop_pct: &str, seed: &str) -> Result<(), String> {
         return Err("the consumer's final book differs from the engine's".to_string());
     }
     println!("consumer's final book matches the engine's");
+    Ok(())
+}
+
+/// The three-thread pipeline against the same work on one thread (D45–D48): 3 runs of each,
+/// alternating. Prints each run's throughput and latency, and fails if any digest differs.
+fn pipeline(path: &str, rate: &str, channel: &str, capacity: &str) -> Result<(), String> {
+    use lob::latency::{row, HEADER};
+    use lob::pipeline::{frames, run as run_pipeline, run_single, Mpsc, Report, Ring};
+    use std::time::Instant;
+
+    let rate: u64 = parse_arg("rate", rate)?;
+    let capacity: usize = parse_arg("capacity", capacity)?;
+    if !capacity.is_power_of_two() {
+        return Err(format!("capacity {capacity} isn't a power of two"));
+    }
+    let run: fn(&[lob::pipeline::Frame], usize, u64) -> Report = match channel {
+        "ring" => run_pipeline::<Ring>,
+        "mpsc" => run_pipeline::<Mpsc>,
+        _ => return Err(format!("unknown channel `{channel}` (ring or mpsc)")),
+    };
+    let journal = load_journal(path)?;
+    let frames = frames(&journal.commands);
+    let n = frames.len() as f64;
+    let mega = |secs: f64| n / secs / 1e6;
+    println!(
+        "{} commands, {channel} capacity {capacity}, {}",
+        frames.len(),
+        match rate {
+            0 => "flooding".to_string(),
+            r => format!("paced at {r} commands/s, latency from the schedule"),
+        }
+    );
+    let mut want = None;
+    for i in 1..=3 {
+        let start = Instant::now();
+        let single = run_single(&frames);
+        let single_secs = start.elapsed().as_secs_f64();
+        let report = run(&frames, capacity, rate);
+        if report.digests != single || want.is_some_and(|w| w != single) {
+            return Err(format!(
+                "run {i}: digests differ\n{single:?}\n{:?}",
+                report.digests
+            ));
+        }
+        want = Some(single);
+        let secs = report.elapsed.as_secs_f64();
+        println!(
+            "run {i}: one thread {:.3} s ({:.2} M/s), pipeline {:.3} s ({:.2} M/s)",
+            single_secs,
+            mega(single_secs),
+            secs,
+            mega(secs)
+        );
+        println!("  {HEADER}");
+        println!("  {}", row("end-to-end", &report.latency));
+    }
+    let d = want.expect("3 runs");
+    println!(
+        "events digest {:016x}  feed digest {:016x}  ({} events, {} feed messages, {} bad frames)",
+        d.events_digest, d.feed_digest, d.events, d.feed_msgs, d.bad_frames
+    );
     Ok(())
 }
 

@@ -11,6 +11,7 @@ clients ──> gateway thread ──SPSC ring──> matching thread ──SPSC
                                            pure, deterministic             command journal (replay)
 ```
 
+Since M9, the engine runs as three threads joined by SPSC rings (D45–D48), with output identical to one thread.
 Since M8, a publisher turns the events into an L2 feed (D40–D44). Before that (M5): two books behind the `OrderBook` trait: the reference book (D8), matching by D9 with modify
 (D11), IOC/FOK/post-only (D12) and instrument rules (D14). Checked by scenario scripts, an
 invariant checker (D10) and an event-only conservation ledger over random sessions (D13).
@@ -909,3 +910,41 @@ flags: bit 0 side (0 buy / 1 sell; the aggressor's for a trade), bit 1 last mess
 - **Why:** stamping with the actual send time hides stalls. A slow pipeline also slows the sender, so fewer samples land in the bad
   period ("coordinated omission", Gil Tene). The schedule fixes it.
 - Clock reads happen only in the gateway and output threads (D23). `Instant` is monotonic across cores on Linux (`CLOCK_MONOTONIC`).
+
+### M9 results (2026-10-07, `lob pipeline`, 2M generated commands, quiet machine, `taskset -c 1,2,3` = three physical cores, i7-1165G7)
+Each configuration ran 3 times, alternating one thread and the pipeline. All digests were equal in every run: events `b3df3bac1e73d7f6`, feed `aeb1c067880da1dd`.
+
+**Throughput, flooding (ring capacity 1024):**
+
+| | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| one thread (decode → apply → encode + hash → publish) | 4.96 M/s | 5.04 M/s | 5.02 M/s |
+| pipeline over the ring | 3.88 M/s | 3.84 M/s | 3.81 M/s |
+| pipeline over `mpsc::sync_channel` | 3.60 M/s | 3.30 M/s | 3.30 M/s |
+
+**Three threads are slower than one at full load.** A pipeline runs at the speed of its slowest stage, and here one stage is
+nearly all the work. One thread spends about 200 ns per command, of which matching is about 30 ns (M8: `lob feed`'s apply-only time).
+So the output stage (event encoding and FNV hashing, about 62 bytes per command hashed a byte at a time, plus the 70 ns publisher) is about
+165 ns. The pipeline's output thread runs at about 260 ns per command (3.8 M/s), so receiving costs it about 90 ns per command.
+That's about 2.4 ring items per command (each event, plus `Done`), and each item means the slot's cache line moving from the matching core to the
+output core. This is inferred from the numbers, not measured with `perf c2c`.
+Fixes, not done: move items in batches (one index store per command, not per event), and split the output stage across threads
+(the event hash and the publisher don't depend on each other).
+
+**Latency, paced (scheduled stamps, D48), ring capacity 1024, ns:**
+
+| rate | channel | p50 (3 runs) | p99 | p99.9 | max |
+|---|---|---|---|---|---|
+| 1 M/s | ring | 823 / 822 / 819 | 15,935 / 14,927 / 17,343 | 124k / 119k / 125k | 437k / 379k / 293k |
+| 1 M/s | mpsc | 4,279 / 4,267 / 4,235 | 55,295 / 45,823 / 31,695 | 437k / 268k / 227k | 1.04M / 515k / 495k |
+| 2 M/s | ring | 716 / 712 / 712 | 21,423 / 16,735 / 22,111 | 143k / 116k / 145k | 459k / 155k / 508k |
+| 3 M/s | ring | 749 / 751 / 769 | 103k / 94k / **2.80M** | 527k / 455k / 3.35M | 591k / 508k / 3.38M |
+
+- **The ring's median is about 5x lower than `mpsc`'s** (0.82 vs 4.3 µs, through two hand-offs and the output stage). `sync_channel` takes a lock
+  and can put a waiting thread to sleep, and waking it goes through the kernel. The ring's waiting side spins first.
+- **Tails come from the laptop, not the ring.** p99.9 is about 120 µs at 1 M/s with the same machine idle. That size matches scheduler
+  preemption and timer interrupts on cores that aren't isolated (`isolcpus`/`nohz_full` were not used). Because stamps are scheduled times, a stall is charged to every command queued behind it.
+- **3 M/s is close to the 3.8 M/s capacity.** Run 3 shows what happens near saturation: one stall left a backlog the pipeline drains
+  only slowly, and p99 jumped from about 0.1 ms to 2.8 ms. With actual-send stamps, this run would have looked almost as good as the others.
+- **Mutation checks:** 12 planted bugs in `ring.rs` and `pipeline.rs`. Weakening `Acquire`/`Release` to `Relaxed` (2 mutants) survives, as D45
+  predicts. The final re-check in `pop` survived until a stress test of 20,000 one-item hand-offs was added, which now catches it 3 runs out of 3.
