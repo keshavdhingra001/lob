@@ -157,6 +157,18 @@ At full load three threads are *slower* than one: the output stage (hashing and 
 command, so splitting off matching saves little and the hand-offs between cores cost more. `lob pipeline <journal> [rate] [ring|mpsc]`.
 Details are in [DESIGN.md](DESIGN.md) (D45–D48, M9 results).
 
+M11 measures everything again in one session and adds real order flow: one symbol's ITCH day translated into engine commands, with each
+execution becoming an order that our engine matches (D54). The full report, with method, machine and raw output, is in [BENCHMARKS.md](BENCHMARKS.md).
+
+| | Reference book | Fast book |
+|---|---|---|
+| Throughput, generated flow / AAPL / SPY | 19.7 / 12.0 / 13.0 M/s | 30.7 / 28.8 / 30.9 M/s |
+| p50 / p99 per command, AAPL | 86 / 230 ns | 48 / 91 ns |
+| Cancel in a 10,000-order queue, p50 | 1,068 ns | 41 ns |
+
+98.7% (AAPL) and 100% (SPY) of the executed shares fill the same order NASDAQ's matching filled. The rest comes from NASDAQ keeping
+entry-time priority for orders it displays late. `scripts/report.sh` reproduces it all (about 15 minutes).
+
 ## Roadmap
 
 - [x] **M0** Scaffold: command/event model, text format, `OrderBook` trait, REPL
@@ -170,5 +182,5 @@ Details are in [DESIGN.md](DESIGN.md) (D45–D48, M9 results).
 - [x] **M8** Market data out: L2 snapshots, incremental updates with sequence numbers, gap recovery
 - [x] **M9** Engine pipeline: gateway -> lock-free SPSC ring -> matching -> output ring
 - [x] **M10** Property tests (proptest): codecs, journal damage, engine and feed
-- [ ] **M11** Benchmark report
+- [x] **M11** Benchmark report: one script, real ITCH flow through both books, BENCHMARKS.md
 - [ ] **M12** Final design write-up

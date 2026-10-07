@@ -1,0 +1,30 @@
+== itch: taskset -c 2 target/release/lob itch data/07302019.NASDAQ_ITCH50 frame
+quiet (idle 88%)
+frame: 282229684 messages, 8662 MB uncompressed, 7.93 s: 35.6 M messages/s, 1092 MB/s
+by type: A 124164371, D 119999061, U 21253951, E 7582422, I 3723793, X 2358032, P 1461010, F 1296379, L 210706, C 135573, Q 17700, Y 8959, H 8869, R 8849, S 6, J 2, V 1
+uptime:  02:10:34 up 1 day,  6:46,  1 user,  load average: 2.54, 3.24, 2.46
+== itch: taskset -c 2 target/release/lob itch data/07302019.NASDAQ_ITCH50 decode
+quiet (idle 85%)
+decode: 282229684 messages, 8662 MB uncompressed, 11.07 s: 25.5 M messages/s, 783 MB/s
+(fold 47842b926777)
+uptime:  02:10:49 up 1 day,  6:46,  1 user,  load average: 2.67, 3.23, 2.47
+== itch: taskset -c 2 target/release/lob itch data/07302019.NASDAQ_ITCH50 book
+quiet (idle 92%)
+book: 282229684 messages, 8662 MB uncompressed, 82.72 s: 3.4 M messages/s, 105 MB/s
+book messages 276789789, live orders at the end 0, peak 1964977
+crossed (pre, market, post): [0, 19, 2], after the open: 0
+locked  (pre, market, post): [0, 0, 0], after the open: 0
+crossed or locked while a cross was unwinding: 21
+E at best (pre, market, post): [39914, 7501295, 41213], not at best: [0, 0, 0]; C executions: 135573
+AAPL at the end of market hours (4711 levels), price  shares  orders:
+  ask   208.9300      100    1
+  ask   208.9200     1700    2
+  ask   208.9100      100    1
+  ask   208.9000      794    4
+  ask   208.8900     1317    3
+  bid   208.8500     3600    4
+  bid   208.8400     4600    6
+  bid   208.8300     2550    4
+  bid   208.8200     1400    2
+  bid   208.8100      100    1
+uptime:  02:12:15 up 1 day,  6:48,  1 user,  load average: 3.67, 3.39, 2.60

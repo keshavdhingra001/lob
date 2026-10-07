@@ -1,0 +1,33 @@
+== latency-queue10k: taskset -c 2 target/release/lob latency target/latency/queue10k.jrnl 5
+quiet (idle 94%)
+cpu      11th Gen Intel(R) Core(TM) i7-1165G7 @ 2.80GHz
+kernel   7.2.5-3-omarchy
+governor powersave (epp performance, no_turbo 0)
+cpus     2 (the cpus this process may run on)
+20000 commands from target/latency/queue10k.jrnl; warm-up, then 5 runs per book, alternating books; showing the run with the median p99
+
+reference (p99/floor per run: 3867/15 3673/15 3403/14 3633/14 3603/14 ns)
+kind             count    mean     p50     p99   p99.9       max   (ns)
+limit-rest       10000      84      43      76    2291    157183
+limit-cross          0
+limit-kill           0
+market               0
+cancel           10000    1337    1068    3879    5579     13359
+modify               0
+reject               0
+all              20000     710      75    3633    5455    157183
+clock floor      20000      14      14      15      15        18
+
+fast (p99/floor per run: 192/15 120/13 117/14 136/14 116/14 ns)
+kind             count    mean     p50     p99   p99.9       max   (ns)
+limit-rest       10000      71      38     129    2767     66879
+limit-cross          0
+limit-kill           0
+market               0
+cancel           10000      44      41     120     522      6487
+modify               0
+reject               0
+all              20000      58      39     120    1158     66879
+clock floor      20000      13      13      16      16       235
+
+uptime:  02:08:52 up 1 day,  6:44,  1 user,  load average: 2.78, 3.60, 2.48

@@ -1,0 +1,66 @@
+== latency-gen2m: taskset -c 2 target/release/lob latency target/latency/gen2m.jrnl 5
+quiet (idle 93%)
+cpu      11th Gen Intel(R) Core(TM) i7-1165G7 @ 2.80GHz
+kernel   7.2.5-3-omarchy
+governor powersave (epp performance, no_turbo 0)
+cpus     2 (the cpus this process may run on)
+2000000 commands from target/latency/gen2m.jrnl; warm-up, then 5 runs per book, alternating books; showing the run with the median p99
+
+reference (p99/floor per run: 275/16 283/17 322/15 277/21 297/15 ns)
+kind             count    mean     p50     p99   p99.9       max   (ns)
+limit-rest      564749      96      86     249     397    116095
+limit-cross     303074      82      52     404     663     13975
+limit-kill       42726      59      54     119     242      4171
+market           66841      65      50     222     369     10327
+cancel          231221     136     131     222     408     59167
+modify           46291     193     158     413     600      6667
+reject          745098      42      40      73     136    129983
+all            2000000      79      61     283     502    129983
+clock floor    2000000      17      17      23      31     12591
+
+fast (p99/floor per run: 192/15 207/17 187/15 272/17 198/16 ns)
+kind             count    mean     p50     p99   p99.9       max   (ns)
+limit-rest      564749      66      53     120     663    195455
+limit-cross     303074      83      47     399     890    208895
+limit-kill       42726      57      43      99     720     55487
+market           66841      63      37     194     580     99263
+cancel          231221      59      51      92     319     71935
+modify           46291      90      72     186    6039     22655
+reject          745098      37      30      73     153    132863
+all            2000000      57      45     198     622    208895
+clock floor    2000000      19      16      22      30    256255
+
+uptime:  02:08:28 up 1 day,  6:44,  1 user,  load average: 2.93, 3.70, 2.48
+== latency-gen2m: taskset -c 2 target/release/lob latency target/latency/gen2m.jrnl 5
+quiet (idle 95%)
+cpu      11th Gen Intel(R) Core(TM) i7-1165G7 @ 2.80GHz
+kernel   7.2.5-3-omarchy
+governor powersave (epp performance, no_turbo 0)
+cpus     2 (the cpus this process may run on)
+2000000 commands from target/latency/gen2m.jrnl; warm-up, then 5 runs per book, alternating books; showing the run with the median p99
+
+reference (p99/floor per run: 257/14 253/14 255/14 257/14 257/14 ns)
+kind             count    mean     p50     p99   p99.9       max   (ns)
+limit-rest      564749      88      77     225     610    129727
+limit-cross     303074      75      45     388     675    106047
+limit-kill       42726      55      49      98     619     16183
+market           66841      59      44     205     526     12455
+cancel          231221     118     114     185     364    126143
+modify           46291     172     133     366     818     31839
+reject          745098      40      37      75     134     14295
+all            2000000      72      57     257     544    129727
+clock floor    2000000      15      14      19      25    112127
+
+fast (p99/floor per run: 177/14 178/14 179/14 178/14 180/14 ns)
+kind             count    mean     p50     p99   p99.9       max   (ns)
+limit-rest      564749      55      50      95     426     63967
+limit-cross     303074      70      45     361     595     14215
+limit-kill       42726      47      41      79     505    108415
+market           66841      49      35     171     440     15799
+cancel          231221      50      49      73     158     14015
+modify           46291      76      60     154     454     14751
+reject          745098      31      28      63     106     16119
+all            2000000      48      43     178     466    108415
+clock floor    2000000      14      14      18      22    116415
+
+uptime:  02:17:12 up 1 day,  6:53,  1 user,  load average: 9.95, 6.91, 4.20

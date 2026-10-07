@@ -1,0 +1,66 @@
+== latency-deep200k: taskset -c 2 target/release/lob latency target/latency/deep200k.jrnl 5
+quiet (idle 90%)
+cpu      11th Gen Intel(R) Core(TM) i7-1165G7 @ 2.80GHz
+kernel   7.2.5-3-omarchy
+governor powersave (epp performance, no_turbo 0)
+cpus     2 (the cpus this process may run on)
+2000000 commands from target/latency/deep200k.jrnl; warm-up, then 5 runs per book, alternating books; showing the run with the median p99
+
+reference (p99/floor per run: 418/16 446/17 424/16 471/15 519/16 ns)
+kind             count    mean     p50     p99   p99.9       max   (ns)
+limit-rest      542826     112      92     302     902    810495
+limit-cross     398384     102      51     635    1520    122559
+limit-kill       50335      62      56     125     253     11455
+market           73371      71      53     273     685     61471
+cancel           98865     252     206     812    6423     89535
+modify           25693     304     263     877    5975     83647
+reject          810526      50      44     117     338    106495
+all            2000000      91      56     446    1096    810495
+clock floor    2000000      19      17      25      38    128575
+
+fast (p99/floor per run: 354/17 314/14 394/15 519/21 344/17 ns)
+kind             count    mean     p50     p99   p99.9       max   (ns)
+limit-rest      542826      74      62     135     848    325119
+limit-cross     398384      98      51     706    1835     67007
+limit-kill       50335      54      49      98     251     22607
+market           73371      61      41     240     699     51711
+cancel           98865     103      74     524    1498     21119
+modify           25693     131     104     503    2115     53727
+reject          810526      40      34      86     264     92223
+all            2000000      66      49     354    1160    325119
+clock floor    2000000      18      17      23      30    147583
+
+uptime:  02:08:40 up 1 day,  6:44,  1 user,  load average: 2.74, 3.62, 2.48
+== latency-deep200k: taskset -c 2 target/release/lob latency target/latency/deep200k.jrnl 5
+quiet (idle 95%)
+cpu      11th Gen Intel(R) Core(TM) i7-1165G7 @ 2.80GHz
+kernel   7.2.5-3-omarchy
+governor powersave (epp performance, no_turbo 0)
+cpus     2 (the cpus this process may run on)
+2000000 commands from target/latency/deep200k.jrnl; warm-up, then 5 runs per book, alternating books; showing the run with the median p99
+
+reference (p99/floor per run: 318/14 323/14 317/14 318/14 324/14 ns)
+kind             count    mean     p50     p99   p99.9       max   (ns)
+limit-rest      542826      88      77     231     546    811519
+limit-cross     398384      75      42     430     869    128255
+limit-kill       50335      50      46      90     203     13183
+market           73371      57      44     205     421     12119
+cancel           98865     185     161     499    1220    123967
+modify           25693     247     210     631    2555    126143
+reject          810526      39      37      76     180     31647
+all            2000000      70      46     318     698    811519
+clock floor    2000000      15      14      20      26    109503
+
+fast (p99/floor per run: 250/14 238/14 239/14 243/14 236/14 ns)
+kind             count    mean     p50     p99   p99.9       max   (ns)
+limit-rest      542826      57      51      93     487    402431
+limit-cross     398384      72      42     454     977    124799
+limit-kill       50335      43      40      75     213     12887
+market           73371      47      34     176     442     16255
+cancel           98865      69      61     207     719     22063
+modify           25693      93      80     250     786     15567
+reject          810526      31      29      64     153    134015
+all            2000000      50      40     239     676    402431
+clock floor    2000000      14      14      19      26     18447
+
+uptime:  02:17:18 up 1 day,  6:53,  1 user,  load average: 9.23, 6.81, 4.18

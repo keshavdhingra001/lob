@@ -1,0 +1,56 @@
+== pipeline: taskset -c 1,2,3 target/release/lob pipeline target/latency/gen2m.jrnl 0 ring
+quiet (idle 92%)
+2000000 commands, ring capacity 1024, flooding
+run 1: one thread 0.302 s (6.61 M/s), pipeline 0.402 s (4.97 M/s)
+  kind             count    mean     p50     p99   p99.9       max   (ns)
+  end-to-end     2000000  292732  288511  398335  430079    511487
+run 2: one thread 0.311 s (6.43 M/s), pipeline 0.404 s (4.96 M/s)
+  kind             count    mean     p50     p99   p99.9       max   (ns)
+  end-to-end     2000000  293848  292351  368127  440575    452351
+run 3: one thread 0.308 s (6.49 M/s), pipeline 0.398 s (5.03 M/s)
+  kind             count    mean     p50     p99   p99.9       max   (ns)
+  end-to-end     2000000  289468  288767  342271  374015    380415
+events digest b3df3bac1e73d7f6  feed digest aeb1c067880da1dd  (2737537 events, 1943563 feed messages, 0 bad frames)
+uptime:  02:09:45 up 1 day,  6:45,  1 user,  load average: 2.41, 3.35, 2.46
+== pipeline: taskset -c 1,2,3 target/release/lob pipeline target/latency/gen2m.jrnl 0 mpsc
+quiet (idle 93%)
+2000000 commands, mpsc capacity 1024, flooding
+run 1: one thread 0.303 s (6.59 M/s), pipeline 0.448 s (4.46 M/s)
+  kind             count    mean     p50     p99   p99.9       max   (ns)
+  end-to-end     2000000  314755  313343  581119  628735    719359
+run 2: one thread 0.315 s (6.34 M/s), pipeline 0.466 s (4.30 M/s)
+  kind             count    mean     p50     p99   p99.9       max   (ns)
+  end-to-end     2000000  332528  327935  586751  632831    668671
+run 3: one thread 0.316 s (6.33 M/s), pipeline 0.479 s (4.18 M/s)
+  kind             count    mean     p50     p99   p99.9       max   (ns)
+  end-to-end     2000000  339379  342783  459775  518911    845311
+events digest b3df3bac1e73d7f6  feed digest aeb1c067880da1dd  (2737537 events, 1943563 feed messages, 0 bad frames)
+uptime:  02:09:51 up 1 day,  6:45,  1 user,  load average: 2.29, 3.31, 2.45
+== pipeline: taskset -c 1,2,3 target/release/lob pipeline target/latency/gen2m.jrnl 1000000 ring
+quiet (idle 91%)
+2000000 commands, ring capacity 1024, paced at 1000000 commands/s, latency from the schedule
+run 1: one thread 0.335 s (5.96 M/s), pipeline 2.000 s (1.00 M/s)
+  kind             count    mean     p50     p99   p99.9       max   (ns)
+  end-to-end     2000000   12016     459  432895  983039   1428479
+run 2: one thread 0.304 s (6.57 M/s), pipeline 2.000 s (1.00 M/s)
+  kind             count    mean     p50     p99   p99.9       max   (ns)
+  end-to-end     2000000     904     440    7627   97087    284671
+run 3: one thread 0.304 s (6.58 M/s), pipeline 2.000 s (1.00 M/s)
+  kind             count    mean     p50     p99   p99.9       max   (ns)
+  end-to-end     2000000     936     452    9391   82751    175487
+events digest b3df3bac1e73d7f6  feed digest aeb1c067880da1dd  (2737537 events, 1943563 feed messages, 0 bad frames)
+uptime:  02:10:03 up 1 day,  6:45,  1 user,  load average: 2.34, 3.28, 2.45
+== pipeline: taskset -c 1,2,3 target/release/lob pipeline target/latency/gen2m.jrnl 1000000 mpsc
+quiet (idle 95%)
+2000000 commands, mpsc capacity 1024, paced at 1000000 commands/s, latency from the schedule
+run 1: one thread 0.313 s (6.39 M/s), pipeline 2.000 s (1.00 M/s)
+  kind             count    mean     p50     p99   p99.9       max   (ns)
+  end-to-end     2000000   20704    3611  657407 1260543   1558527
+run 2: one thread 0.326 s (6.14 M/s), pipeline 2.000 s (1.00 M/s)
+  kind             count    mean     p50     p99   p99.9       max   (ns)
+  end-to-end     2000000    5221    3389   38047  289279    631295
+run 3: one thread 0.387 s (5.16 M/s), pipeline 2.000 s (1.00 M/s)
+  kind             count    mean     p50     p99   p99.9       max   (ns)
+  end-to-end     2000000   11773    3491  144511 1777663   2686975
+events digest b3df3bac1e73d7f6  feed digest aeb1c067880da1dd  (2737537 events, 1943563 feed messages, 0 bad frames)
+uptime:  02:10:22 up 1 day,  6:46,  1 user,  load average: 2.54, 3.26, 2.46

@@ -1056,3 +1056,17 @@ the ITCH rebuild rate (M7) and criterion (M6). Every raw output starts with a ma
 
 ### D57: No charts in M11
 Tables only. Percentile plots can be added in M12 if they're wanted.
+
+### M11 results (2026-10-08)
+All numbers are in [BENCHMARKS.md](BENCHMARKS.md), with the raw output in `bench/results/2026-10-08-0206/`. The ones that change earlier conclusions:
+- **Real flow (D54):** the fast book runs at 28.8 M/s on AAPL and 30.9 M/s on SPY, **2.4x the reference book** (1.55x on generated flow). p99 is 91 / 86 ns, against 230 / 167.
+  The gap is wider because of the command mix: real flow is 46–48% cancels and has no rejects.
+- **Our matching agrees with NASDAQ:** 98.68% of AAPL's executed shares and 100% of SPY's hit the order NASDAQ named. All 1,881 AAPL fills that disagreed have the same cause:
+  NASDAQ filled an order with a lower reference first, even though it was displayed after the order our FIFO filled. So NASDAQ keeps entry-time priority for orders
+  displayed late, and our engine, which only sees arrival order, can't reproduce that.
+- **Full-depth snapshots don't scale:** recovering AAPL at 1% loss moves 1.14 GB for a 42 MB feed (D42's design assumed shallow books).
+- **Method fixes, found while running it:**
+  - `cargo bench` compiled its binary *after* the quiet check, so a build that uses every core ran into the measurement. The script now builds everything first.
+  - Two latency parts ran with clock floors of 15–21 ns. The script can now redo single parts (`OUT=... ONLY=...`), appending to the same file so both runs stay on record.
+- **Translator tests:** 9 tests, including random flow checked against a model of NASDAQ's book. With executions at the queue head, our book equals NASDAQ's after every message.
+  With executions anywhere at the touch, every order live in ours is live in NASDAQ's, and both end empty. 13 planted bugs, all caught.

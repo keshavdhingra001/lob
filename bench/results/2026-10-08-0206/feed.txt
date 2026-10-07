@@ -1,0 +1,24 @@
+== feed: taskset -c 2 target/release/lob feed target/latency/gen2m.jrnl
+quiet (idle 90%)
+2000000 commands: 1249419 level updates, 694144 trades, 55530314 bytes (27.8 per command)
+digest   aeb1c067880da1dd
+fast book, best of 5: apply 32.1 ns/command, apply + publish + encode 108.7 ns/command (+76.6)
+link (drop 1%, duplicate 5%, seed 1): 19030 gaps, 19030 snapshots, 105312 duplicates ignored, 92400094 bytes delivered
+consumer's final book matches the engine's
+uptime:  02:09:25 up 1 day,  6:45,  1 user,  load average: 2.54, 3.44, 2.47
+== feed: taskset -c 2 target/release/lob feed target/latency/aapl.jrnl
+quiet (idle 91%)
+1356940 commands: 1356904 level updates, 60148 trades, 42270968 bytes (31.2 per command)
+digest   6af138348d375471
+fast book, best of 5: apply 34.2 ns/command, apply + publish + encode 148.6 ns/command (+114.5)
+link (drop 1%, duplicate 5%, seed 1): 13765 gaps, 13765 snapshots, 77243 duplicates ignored, 1136633143 bytes delivered
+consumer's final book matches the engine's
+uptime:  02:09:32 up 1 day,  6:45,  1 user,  load average: 2.50, 3.41, 2.47
+== feed: taskset -c 2 target/release/lob feed target/latency/spy.jrnl
+quiet (idle 87%)
+2231472 commands: 2231472 level updates, 55538 trades, 68388148 bytes (30.6 per command)
+digest   35c3f1213a4d7f40
+fast book, best of 5: apply 29.6 ns/command, apply + publish + encode 119.5 ns/command (+89.9)
+link (drop 1%, duplicate 5%, seed 1): 22332 gaps, 22332 snapshots, 124692 duplicates ignored, 410146570 bytes delivered
+consumer's final book matches the engine's
+uptime:  02:09:39 up 1 day,  6:45,  1 user,  load average: 2.38, 3.37, 2.46

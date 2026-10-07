@@ -1,0 +1,33 @@
+== latency-spy: taskset -c 2 target/release/lob latency target/latency/spy.jrnl 5
+quiet (idle 90%)
+cpu      11th Gen Intel(R) Core(TM) i7-1165G7 @ 2.80GHz
+kernel   7.2.5-3-omarchy
+governor powersave (epp performance, no_turbo 0)
+cpus     2 (the cpus this process may run on)
+2231472 commands from target/latency/spy.jrnl; warm-up, then 5 runs per book, alternating books; showing the run with the median p99
+
+reference (p99/floor per run: 166/14 162/14 192/14 167/14 167/14 ns)
+kind             count    mean     p50     p99   p99.9       max   (ns)
+limit-rest     1106199      83      74     168     769    153215
+limit-cross      55538      72      60     166     719     19647
+limit-kill           0
+market               0
+cancel         1062153     100      93     167     815    119039
+modify            7582      88      80     156     737     14575
+reject               0
+all            2231472      91      82     167     779    153215
+clock floor    2231472      15      14      20      27    140927
+
+fast (p99/floor per run: 83/15 86/14 89/14 88/14 84/14 ns)
+kind             count    mean     p50     p99   p99.9       max   (ns)
+limit-rest     1106199      53      48      90     506    126271
+limit-cross      55538      56      51     109     452     12111
+limit-kill           0
+market               0
+cancel         1062153      44      41      76     164     36831
+modify            7582      40      36      58     545     14375
+reject               0
+all            2231472      49      46      86     401    126271
+clock floor    2231472      15      14      19      24     40767
+
+uptime:  02:09:19 up 1 day,  6:45,  1 user,  load average: 2.59, 3.46, 2.47

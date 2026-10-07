@@ -1,0 +1,14 @@
+== translate: target/release/lob itch data/07302019.NASDAQ_ITCH50 journal AAPL target/latency/aapl.jrnl
+quiet (idle 88%)
+AAPL: 1316316 messages -> 1356940 commands in target/latency/aapl.jrnl
+adds 669331 (sub-penny, skipped: 6; traded on arrival: 0), executions 59179, cross executions 643
+IOC shares: 5168039 filled the named order (98.68%), 65476 another order, 3900 unfilled
+resync cancels 68, skipped (gone from our book) 20, untracked 6, rejects 0; 0 orders resting at the end
+uptime:  02:06:55 up 1 day,  6:42,  1 user,  load average: 3.20, 3.90, 2.41
+== translate: target/release/lob itch data/07302019.NASDAQ_ITCH50 journal SPY target/latency/spy.jrnl
+quiet (idle 88%)
+SPY: 2114420 messages -> 2231472 commands in target/latency/spy.jrnl
+adds 1106202 (sub-penny, skipped: 3; traded on arrival: 0), executions 55538, cross executions 1496
+IOC shares: 6970631 filled the named order (100.00%), 0 another order, 0 unfilled
+resync cancels 0, skipped (gone from our book) 0, untracked 3, rejects 0; 0 orders resting at the end
+uptime:  02:07:19 up 1 day,  6:43,  1 user,  load average: 3.74, 3.97, 2.48

@@ -1,0 +1,40 @@
+== throughput: taskset -c 2 target/release/lob bench target/latency/gen2m.jrnl
+quiet (idle 94%)
+2000000 commands, best of 5; 1658 orders resting at the end
+                 apply only               full replay (+ encode + hash)
+reference     101.4 ms  19.72 M/s        177.5 ms  11.27 M/s   digest b3df3bac1e73d7f6
+fast           65.2 ms  30.67 M/s        141.7 ms  14.11 M/s   digest b3df3bac1e73d7f6
+speedup        1.55x                     1.25x
+uptime:  02:07:32 up 1 day,  6:43,  1 user,  load average: 3.32, 3.87, 2.46
+== throughput: taskset -c 2 target/release/lob bench target/latency/deep200k.jrnl
+quiet (idle 86%)
+2000000 commands, best of 5; 16741 orders resting at the end
+                 apply only               full replay (+ encode + hash)
+reference     111.9 ms  17.87 M/s        212.8 ms   9.40 M/s   digest 1c1b7e5b08638ccf
+fast           71.7 ms  27.88 M/s        169.6 ms  11.79 M/s   digest 1c1b7e5b08638ccf
+speedup        1.56x                     1.25x
+uptime:  02:07:49 up 1 day,  6:43,  1 user,  load average: 3.12, 3.80, 2.47
+== throughput: taskset -c 2 target/release/lob bench target/latency/queue10k.jrnl
+quiet (idle 87%)
+20000 commands, best of 5; 0 orders resting at the end
+                 apply only               full replay (+ encode + hash)
+reference      13.5 ms   1.49 M/s         14.1 ms   1.42 M/s   digest 955349a4f51845ed
+fast            0.7 ms  29.89 M/s          1.2 ms  16.19 M/s   digest 955349a4f51845ed
+speedup       20.13x                    11.37x
+uptime:  02:07:53 up 1 day,  6:43,  1 user,  load average: 3.12, 3.80, 2.47
+== throughput: taskset -c 2 target/release/lob bench target/latency/aapl.jrnl
+quiet (idle 88%)
+1356940 commands, best of 5; 0 orders resting at the end
+                 apply only               full replay (+ encode + hash)
+reference     113.1 ms  12.00 M/s        146.0 ms   9.29 M/s   digest aae14b71606f97ee
+fast           47.2 ms  28.75 M/s         87.5 ms  15.51 M/s   digest aae14b71606f97ee
+speedup        2.40x                     1.67x
+uptime:  02:08:05 up 1 day,  6:43,  1 user,  load average: 3.58, 3.87, 2.51
+== throughput: taskset -c 2 target/release/lob bench target/latency/spy.jrnl
+quiet (idle 86%)
+2231472 commands, best of 5; 0 orders resting at the end
+                 apply only               full replay (+ encode + hash)
+reference     171.4 ms  13.02 M/s        223.6 ms   9.98 M/s   digest cfceeaa05529bd23
+fast           72.2 ms  30.92 M/s        128.5 ms  17.36 M/s   digest cfceeaa05529bd23
+speedup        2.37x                     1.74x
+uptime:  02:08:12 up 1 day,  6:44,  1 user,  load average: 3.29, 3.81, 2.50

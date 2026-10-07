@@ -1,0 +1,33 @@
+== latency-aapl: taskset -c 2 target/release/lob latency target/latency/aapl.jrnl 5
+quiet (idle 94%)
+cpu      11th Gen Intel(R) Core(TM) i7-1165G7 @ 2.80GHz
+kernel   7.2.5-3-omarchy
+governor powersave (epp performance, no_turbo 0)
+cpus     2 (the cpus this process may run on)
+1356940 commands from target/latency/aapl.jrnl; warm-up, then 5 runs per book, alternating books; showing the run with the median p99
+
+reference (p99/floor per run: 228/14 228/14 230/14 268/14 260/14 ns)
+kind             count    mean     p50     p99   p99.9       max   (ns)
+limit-rest      669325      86      80     184     466    343551
+limit-cross      59143      72      66     161     352     14687
+limit-kill          36      36      35      60      60        60
+market               0
+cancel          626536     105      95     256     771     23567
+modify            1900     168     150     520    1244      1466
+reject               0
+all            1356940      94      86     230     690    343551
+clock floor    1356940      14      14      16      22     15599
+
+fast (p99/floor per run: 91/14 91/14 91/14 143/14 136/14 ns)
+kind             count    mean     p50     p99   p99.9       max   (ns)
+limit-rest      669325      55      50      88     513    381695
+limit-cross      59143      59      55     111     460      9247
+limit-kill          36      28      29      41      41        41
+market               0
+cancel          626536      47      44      87     259     17759
+modify            1900      44      41      74     612       647
+reject               0
+all            1356940      51      48      91     461    381695
+clock floor    1356940      14      14      16      23      9367
+
+uptime:  02:09:08 up 1 day,  6:45,  1 user,  load average: 2.31, 3.45, 2.45
