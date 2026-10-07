@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use hdrhistogram::Histogram;
 
-use crate::book::OrderBook;
+use crate::book::{apply_all, OrderBook};
 use crate::command::{Command, Event};
 
 /// What a command turned out to do. Decided from its events, after `apply`.
@@ -153,12 +153,7 @@ pub fn measure<B: OrderBook>(commands: &[Command]) -> Report {
 /// frequency and fills the caches and branch predictors, so the first timed run isn't
 /// systematically slower than the rest (D27).
 pub fn warm_up<B: OrderBook>(commands: &[Command]) {
-    let mut book = B::with_config(Default::default());
-    let mut events = Vec::with_capacity(64);
-    for cmd in commands {
-        events.clear();
-        book.apply(cmd, &mut events);
-    }
+    apply_all(&mut B::with_config(Default::default()), commands);
 }
 
 /// Measure books `A` and `B` alternately, `runs` times each, after warming up both (D27).

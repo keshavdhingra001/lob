@@ -3,8 +3,7 @@
 A limit order book and matching engine written from scratch in Rust: price-time priority
 matching, deterministic replay, and measured tail latency.
 
-> Work in progress. See [CHECKPOINT.md](CHECKPOINT.md) for status and the roadmap, and
-> [DESIGN.md](DESIGN.md) for design decisions.
+> Work in progress: M0–M7 of the [roadmap](#roadmap) are done. [DESIGN.md](DESIGN.md) records every design decision.
 
 ## Try it
 
@@ -120,6 +119,18 @@ M7 replays a real NASDAQ TotalView-ITCH 5.0 day (30 July 2019, 282M messages) an
 `lob itch <file> [frame|decode|book|dump] [symbol]`. The sample files are at emi.nasdaq.com/ITCH and aren't in the repo.
 Details are in [DESIGN.md](DESIGN.md) (D35–D39, M7 results).
 
-## Planned
+## Roadmap
 
-- A lock-free pipeline between gateway, matching and market data threads.
+- [x] **M0** Scaffold: command/event model, text format, `OrderBook` trait, REPL
+- [x] **M1** Reference book: price-time priority, limit / market / cancel, scenario tests, invariant checker
+- [x] **M2** Order lifecycle: modify, IOC / FOK / post-only, tick and max-quantity rules, a conservation ledger
+- [x] **M3** Deterministic replay: binary journal, sequenced events, golden digest, order-flow generator
+- [x] **M4** Fast book: slab, intrusive lists, O(1) cancel; identical events to M1 over 15M commands
+- [x] **M5** Latency measurement: per-command histograms, criterion, `perf`
+- [x] **M6** Zero allocations per command, tick-indexed price ladder, cache-line layout
+- [x] **M7** Real market data: NASDAQ ITCH 5.0 parser, every symbol's book rebuilt from a sample day
+- [ ] **M8** Market data out: L1/L2 snapshots, incremental updates with sequence numbers, gap recovery
+- [ ] **M9** Engine pipeline: gateway -> lock-free SPSC ring -> matching -> output ring
+- [ ] **M10** Fuzzing and property tests
+- [ ] **M11** Benchmark report
+- [ ] **M12** Final design write-up

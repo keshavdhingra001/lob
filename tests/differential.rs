@@ -8,7 +8,7 @@
 mod common;
 
 use common::random_command;
-use lob::gen::{GenConfig, Generator};
+use lob::gen::Generator;
 use lob::ledger::Ledger;
 use lob::rng::Rng;
 use lob::{BookConfig, Command, FastBook, OrderBook, Price, RefBook, Side};
@@ -70,14 +70,6 @@ fn compare(
     }
 }
 
-fn generated(seed: u64, n: usize) -> impl Iterator<Item = Command> {
-    Generator::new(GenConfig {
-        seed,
-        ..GenConfig::default()
-    })
-    .take(n)
-}
-
 fn edge_cases(seed: u64, n: usize, tick: i64) -> impl Iterator<Item = Command> {
     let mut rng = Rng::new(seed);
     let mut next_id = 1;
@@ -136,7 +128,7 @@ fn generated_flow_matches_reference() {
         compare(
             &format!("generated seed {seed}"),
             BookConfig::default(),
-            generated(seed, 40_000),
+            Generator::seeded(seed).take(40_000),
             10,
         );
     }
@@ -207,7 +199,7 @@ fn long_differential_run() {
         compare(
             &format!("generated seed {seed}"),
             BookConfig::default(),
-            generated(seed, 1_000_000),
+            Generator::seeded(seed).take(1_000_000),
             1_000,
         );
     }

@@ -192,18 +192,6 @@ impl FastBook {
         enough
     }
 
-    fn validate(&self, qty: Qty, price: Option<Price>) -> Result<(), RejectReason> {
-        if qty.0 == 0 {
-            Err(RejectReason::ZeroQty)
-        } else if qty.0 > self.config.max_qty {
-            Err(RejectReason::QtyTooLarge)
-        } else if price.is_some_and(|p| p.0 % self.config.tick_size != 0) {
-            Err(RejectReason::BadTick)
-        } else {
-            Ok(())
-        }
-    }
-
     fn submit(
         &mut self,
         id: OrderId,
@@ -213,7 +201,7 @@ impl FastBook {
         tif: TimeInForce,
         out: &mut Vec<Event>,
     ) {
-        let check = self.validate(qty, limit).and_then(|()| {
+        let check = self.config.check(qty, limit).and_then(|()| {
             if self.last_id.is_some_and(|last| id <= last) {
                 Err(RejectReason::IdNotIncreasing)
             } else if tif == TimeInForce::PostOnly
@@ -405,7 +393,7 @@ impl FastBook {
         let Some(&slot) = self.index.get(&id) else {
             return reject(out, RejectReason::UnknownOrder);
         };
-        if let Err(reason) = self.validate(qty, Some(price)) {
+        if let Err(reason) = self.config.check(qty, Some(price)) {
             return reject(out, reason);
         }
         let node = self.orders[slot];

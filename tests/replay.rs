@@ -1,18 +1,13 @@
 //! Deterministic replay end to end: generator -> journal -> replay -> digest.
 
-use lob::gen::{GenConfig, Generator};
+use lob::gen::Generator;
 use lob::journal::{read_journal, JournalWriter};
 use lob::ledger::Ledger;
 use lob::replay::replay;
 use lob::{Command, OrderBook, RefBook};
 
 fn generate(seed: u64, n: usize) -> Vec<Command> {
-    Generator::new(GenConfig {
-        seed,
-        ..GenConfig::default()
-    })
-    .take(n)
-    .collect()
+    Generator::seeded(seed).take(n).collect()
 }
 
 fn event_bytes(commands: &[Command]) -> (lob::replay::ReplayStats, Vec<u8>) {

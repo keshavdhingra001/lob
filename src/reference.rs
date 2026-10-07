@@ -90,19 +90,6 @@ impl RefBook {
         false
     }
 
-    /// Checks shared by new orders and modifies (D14).
-    fn validate(&self, qty: Qty, price: Option<Price>) -> Result<(), RejectReason> {
-        if qty.0 == 0 {
-            Err(RejectReason::ZeroQty)
-        } else if qty.0 > self.config.max_qty {
-            Err(RejectReason::QtyTooLarge)
-        } else if price.is_some_and(|p| p.0 % self.config.tick_size != 0) {
-            Err(RejectReason::BadTick)
-        } else {
-            Ok(())
-        }
-    }
-
     /// A new limit (`limit = Some`) or market (`limit = None`) order.
     fn submit(
         &mut self,
@@ -113,7 +100,7 @@ impl RefBook {
         tif: TimeInForce,
         out: &mut Vec<Event>,
     ) {
-        let check = self.validate(qty, limit).and_then(|()| {
+        let check = self.config.check(qty, limit).and_then(|()| {
             if self.last_id.is_some_and(|last| id <= last) {
                 Err(RejectReason::IdNotIncreasing)
             } else if tif == TimeInForce::PostOnly
@@ -255,7 +242,7 @@ impl RefBook {
         let Some(&(side, old_price)) = self.resting.get(&id) else {
             return reject(out, RejectReason::UnknownOrder);
         };
-        if let Err(reason) = self.validate(qty, Some(price)) {
+        if let Err(reason) = self.config.check(qty, Some(price)) {
             return reject(out, reason);
         }
         let crosses = self.would_cross(side, price);

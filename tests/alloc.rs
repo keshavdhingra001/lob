@@ -72,9 +72,8 @@ fn steady_state<B: OrderBook>(mut book: B, commands: &[Command], warm_up: usize)
 
 fn flow(seed: u64, n: usize, max_live: usize) -> Vec<Command> {
     Generator::new(GenConfig {
-        seed,
         max_live,
-        ..GenConfig::default()
+        ..GenConfig::with_seed(seed)
     })
     .take(n)
     .collect()

@@ -15,8 +15,9 @@ use std::fs::{self, File};
 use std::io::{self, BufRead, BufWriter, Write};
 use std::process::ExitCode;
 
+use lob::book::apply_all;
 use lob::gen::{GenConfig, Generator};
-use lob::journal::{read_journal, JournalWriter};
+use lob::journal::{read_journal, Journal, JournalWriter};
 use lob::latency::{measure_interleaved, median_run, table, Report};
 use lob::replay::{replay, replay_timed};
 use lob::scenario::run_line;
@@ -79,32 +80,45 @@ fn main() -> ExitCode {
     }
 }
 
+/// A numeric argument, or "bad <what> `<arg>`".
+fn parse_arg<T: std::str::FromStr>(what: &str, arg: &str) -> Result<T, String> {
+    arg.parse().map_err(|_| format!("bad {what} `{arg}`"))
+}
+
+fn load_journal(path: &str) -> Result<Journal, String> {
+    let bytes = fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+    read_journal(&bytes).map_err(|e| format!("{path}: {e}"))
+}
+
+fn write_journal(path: &str, commands: impl IntoIterator<Item = Command>) -> Result<(), String> {
+    let err = |e: io::Error| format!("{path}: {e}");
+    let file = File::create(path).map_err(err)?;
+    let mut journal = JournalWriter::new(BufWriter::new(file)).map_err(err)?;
+    for cmd in commands {
+        journal.append(&cmd).map_err(err)?;
+    }
+    journal.finish().map(drop).map_err(err)
+}
+
 fn gen(seed: &str, count: &str, path: &str, max_live: Option<&str>) -> Result<(), String> {
-    let seed: u64 = seed.parse().map_err(|_| format!("bad seed `{seed}`"))?;
-    let count: usize = count.parse().map_err(|_| format!("bad count `{count}`"))?;
+    let seed = parse_arg("seed", seed)?;
+    let count = parse_arg("count", count)?;
     let max_live = match max_live {
-        Some(m) => m.parse().map_err(|_| format!("bad max-live `{m}`"))?,
+        Some(m) => parse_arg("max-live", m)?,
         None => GenConfig::default().max_live,
     };
-    let file = File::create(path).map_err(|e| format!("{path}: {e}"))?;
-    let mut journal = JournalWriter::new(BufWriter::new(file)).map_err(|e| e.to_string())?;
     let config = GenConfig {
-        seed,
         max_live,
-        ..GenConfig::default()
+        ..GenConfig::with_seed(seed)
     };
-    for cmd in Generator::new(config).take(count) {
-        journal.append(&cmd).map_err(|e| e.to_string())?;
-    }
-    journal.finish().map_err(|e| e.to_string())?;
+    write_journal(path, Generator::new(config).take(count))?;
     let size = fs::metadata(path).map_err(|e| e.to_string())?.len();
     println!("wrote {count} commands ({size} bytes) to {path}");
     Ok(())
 }
 
 fn replay_file(path: &str, events_path: Option<&str>) -> Result<(), String> {
-    let bytes = fs::read(path).map_err(|e| format!("{path}: {e}"))?;
-    let journal = read_journal(&bytes).map_err(|e| format!("{path}: {e}"))?;
+    let journal = load_journal(path)?;
     if let Some(at) = journal.torn_tail {
         eprintln!("warning: torn tail at byte {at}; replaying the complete records before it");
     }
@@ -139,13 +153,8 @@ fn replay_file(path: &str, events_path: Option<&str>) -> Result<(), String> {
 }
 
 fn gen_queue(n: &str, path: &str) -> Result<(), String> {
-    let n: u64 = n.parse().map_err(|_| format!("bad order count `{n}`"))?;
-    let file = File::create(path).map_err(|e| format!("{path}: {e}"))?;
-    let mut journal = JournalWriter::new(BufWriter::new(file)).map_err(|e| e.to_string())?;
-    for cmd in lob::gen::deep_queue(n, 1) {
-        journal.append(&cmd).map_err(|e| e.to_string())?;
-    }
-    journal.finish().map_err(|e| e.to_string())?;
+    let n = parse_arg("order count", n)?;
+    write_journal(path, lob::gen::deep_queue(n, 1))?;
     println!("wrote {n} queued orders + {n} cancels to {path}");
     Ok(())
 }
@@ -153,8 +162,7 @@ fn gen_queue(n: &str, path: &str) -> Result<(), String> {
 /// Best of 5 runs per book, each on a fresh book. Whole-session throughput only:
 /// per-command latency percentiles are M5.
 fn bench(path: &str) -> Result<(), String> {
-    let bytes = fs::read(path).map_err(|e| format!("{path}: {e}"))?;
-    let journal = read_journal(&bytes).map_err(|e| format!("{path}: {e}"))?;
+    let journal = load_journal(path)?;
     let commands = &journal.commands;
     let n = commands.len() as f64;
 
@@ -169,12 +177,8 @@ fn bench(path: &str) -> Result<(), String> {
             digest = stats.digest;
 
             let mut book = B::with_config(Default::default());
-            let mut events = Vec::with_capacity(64);
             let start = std::time::Instant::now();
-            for cmd in commands {
-                events.clear();
-                book.apply(cmd, &mut events);
-            }
+            apply_all(&mut book, commands);
             apply_best = apply_best.min(start.elapsed().as_secs_f64());
             resting = [lob::Side::Buy, lob::Side::Sell]
                 .iter()
@@ -221,8 +225,7 @@ fn latency(path: &str, runs: &str) -> Result<(), String> {
         Ok(n) if n > 0 => n,
         _ => return Err(format!("bad run count `{runs}`")),
     };
-    let bytes = fs::read(path).map_err(|e| format!("{path}: {e}"))?;
-    let journal = read_journal(&bytes).map_err(|e| format!("{path}: {e}"))?;
+    let journal = load_journal(path)?;
     let commands = &journal.commands;
     print!("{}", machine());
     println!(
@@ -255,27 +258,16 @@ fn latency(path: &str, runs: &str) -> Result<(), String> {
 /// so `perf stat` counts matching and not timing or printing (D29). `none` decodes the
 /// journal and stops: run it too and subtract, to remove the decoding cost.
 fn run(book: &str, path: &str, repeats: &str) -> Result<(), String> {
-    let repeats: usize = repeats
-        .parse()
-        .map_err(|_| format!("bad repeat count `{repeats}`"))?;
-    let bytes = fs::read(path).map_err(|e| format!("{path}: {e}"))?;
-    let journal = read_journal(&bytes).map_err(|e| format!("{path}: {e}"))?;
-    fn apply_all<B: OrderBook>(commands: &[Command], repeats: usize) -> usize {
-        let mut events = Vec::with_capacity(64);
-        let mut total = 0;
-        for _ in 0..repeats {
-            let mut book = B::with_config(Default::default());
-            for cmd in commands {
-                events.clear();
-                book.apply(cmd, &mut events);
-                total += events.len();
-            }
-        }
-        total
+    let repeats: usize = parse_arg("repeat count", repeats)?;
+    let journal = load_journal(path)?;
+    fn repeat<B: OrderBook>(commands: &[Command], repeats: usize) -> usize {
+        (0..repeats)
+            .map(|_| apply_all(&mut B::with_config(Default::default()), commands))
+            .sum()
     }
     let events = match book {
-        "ref" => apply_all::<RefBook>(&journal.commands, repeats),
-        "fast" => apply_all::<FastBook>(&journal.commands, repeats),
+        "ref" => repeat::<RefBook>(&journal.commands, repeats),
+        "fast" => repeat::<FastBook>(&journal.commands, repeats),
         "none" => 0,
         _ => return Err(format!("unknown book `{book}` (ref, fast or none)")),
     };

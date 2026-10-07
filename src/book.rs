@@ -1,7 +1,7 @@
 //! The interface every book implementation provides. M1 adds the reference book
 //! (simple, obviously correct); M4 adds the fast book and tests it against M1.
 
-use crate::command::{Command, Event};
+use crate::command::{Command, Event, RejectReason};
 use crate::types::{Price, Qty, Side};
 
 /// Aggregated view of one price level, for depth queries and market data.
@@ -38,6 +38,33 @@ impl BookConfig {
         assert!(self.tick_size > 0, "tick_size must be positive");
         assert!(self.max_qty > 0, "max_qty must be positive");
     }
+
+    /// The rules every new order and modify must pass (D14). `price` is `None` for a market
+    /// order. Both books call this; their matching logic stays separate on purpose (D22).
+    pub fn check(&self, qty: Qty, price: Option<Price>) -> Result<(), RejectReason> {
+        if qty.0 == 0 {
+            Err(RejectReason::ZeroQty)
+        } else if qty.0 > self.max_qty {
+            Err(RejectReason::QtyTooLarge)
+        } else if price.is_some_and(|p| p.0 % self.tick_size != 0) {
+            Err(RejectReason::BadTick)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Apply every command in order, untimed, reusing one event buffer. Returns the number of
+/// events, so a caller can keep the work from being optimized away.
+pub fn apply_all<B: OrderBook>(book: &mut B, commands: &[Command]) -> usize {
+    let mut events = Vec::with_capacity(64);
+    let mut total = 0;
+    for cmd in commands {
+        events.clear();
+        book.apply(cmd, &mut events);
+        total += events.len();
+    }
+    total
 }
 
 pub trait OrderBook {

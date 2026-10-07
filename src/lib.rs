@@ -1,6 +1,6 @@
 //! lob: a price-time priority limit order book and matching engine.
 //!
-//! See DESIGN.md for decisions and CHECKPOINT.md for the roadmap.
+//! See DESIGN.md for decisions and README.md for the roadmap.
 
 pub mod book;
 pub mod command;

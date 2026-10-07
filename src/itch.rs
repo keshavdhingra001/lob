@@ -311,9 +311,10 @@ pub fn decode(b: &[u8]) -> Result<Message, DecodeError> {
 }
 
 /// Encode a decoded message, with its 2-byte length prefix, for tests and synthetic
-/// files. `Other` and the dropped fields (`F`'s attribution, `R`'s and `H`'s extra
-/// fields) can't be rebuilt, so `Other` panics and the rest are written as zeros
-/// (`AddOrder` is always written as `A`).
+/// files. Fields are written in wire order, so this never repeats `decode`'s offsets (the
+/// round-trip test would miss an offset that was wrong in both). Fields `decode` drops
+/// (`F`'s attribution, the rest of `R` and `H`, `P`'s order reference) are written as
+/// zeros, `AddOrder` is always written as `A`, and `Other` panics.
 pub fn encode(msg: &Message, out: &mut Vec<u8>) {
     let kind = match msg.body {
         Body::SystemEvent { .. } => b'S',
@@ -330,18 +331,22 @@ pub fn encode(msg: &Message, out: &mut Vec<u8>) {
         Body::Other(k) => panic!("can't encode undecoded type {}", k as char),
     };
     let len = message_len(kind).expect("known type");
-    let mut b = [0u8; 64];
-    b[0] = kind;
-    b[1..3].copy_from_slice(&msg.header.locate.to_be_bytes());
-    b[3..5].copy_from_slice(&msg.header.tracking.to_be_bytes());
-    b[5..11].copy_from_slice(&msg.header.timestamp.to_be_bytes()[2..]);
+    out.extend_from_slice(&(len as u16).to_be_bytes());
+    let start = out.len();
+    // Append each value's big-endian bytes, in order.
+    macro_rules! put {
+        ($($x:expr),*) => {{ $( out.extend_from_slice(&$x.to_be_bytes()); )* }};
+    }
     let side = |s: Side| if s == Side::Buy { b'B' } else { b'S' };
+    let h = msg.header;
+    put!(kind, h.locate, h.tracking);
+    out.extend_from_slice(&h.timestamp.to_be_bytes()[2..]); // u48
     match msg.body {
-        Body::SystemEvent { code } => b[11] = code,
-        Body::StockDirectory { stock } => b[11..19].copy_from_slice(&stock.0),
+        Body::SystemEvent { code } => put!(code),
+        Body::StockDirectory { stock } => out.extend_from_slice(&stock.0),
         Body::TradingAction { stock, state } => {
-            b[11..19].copy_from_slice(&stock.0);
-            b[19] = state;
+            out.extend_from_slice(&stock.0);
+            put!(state);
         }
         Body::AddOrder {
             order_ref,
@@ -350,50 +355,36 @@ pub fn encode(msg: &Message, out: &mut Vec<u8>) {
             stock,
             price,
         } => {
-            b[11..19].copy_from_slice(&order_ref.to_be_bytes());
-            b[19] = side(s);
-            b[20..24].copy_from_slice(&shares.to_be_bytes());
-            b[24..32].copy_from_slice(&stock.0);
-            b[32..36].copy_from_slice(&price.to_be_bytes());
+            put!(order_ref, side(s), shares);
+            out.extend_from_slice(&stock.0);
+            put!(price);
         }
         Body::Executed {
             order_ref,
             shares,
             match_number,
-        } => {
-            b[11..19].copy_from_slice(&order_ref.to_be_bytes());
-            b[19..23].copy_from_slice(&shares.to_be_bytes());
-            b[23..31].copy_from_slice(&match_number.to_be_bytes());
-        }
+        } => put!(order_ref, shares, match_number),
         Body::ExecutedWithPrice {
             order_ref,
             shares,
             match_number,
             printable,
             price,
-        } => {
-            b[11..19].copy_from_slice(&order_ref.to_be_bytes());
-            b[19..23].copy_from_slice(&shares.to_be_bytes());
-            b[23..31].copy_from_slice(&match_number.to_be_bytes());
-            b[31] = if printable { b'Y' } else { b'N' };
-            b[32..36].copy_from_slice(&price.to_be_bytes());
-        }
-        Body::Cancel { order_ref, shares } => {
-            b[11..19].copy_from_slice(&order_ref.to_be_bytes());
-            b[19..23].copy_from_slice(&shares.to_be_bytes());
-        }
-        Body::Delete { order_ref } => b[11..19].copy_from_slice(&order_ref.to_be_bytes()),
+        } => put!(
+            order_ref,
+            shares,
+            match_number,
+            if printable { b'Y' } else { b'N' },
+            price
+        ),
+        Body::Cancel { order_ref, shares } => put!(order_ref, shares),
+        Body::Delete { order_ref } => put!(order_ref),
         Body::Replace {
             old_ref,
             new_ref,
             shares,
             price,
-        } => {
-            b[11..19].copy_from_slice(&old_ref.to_be_bytes());
-            b[19..27].copy_from_slice(&new_ref.to_be_bytes());
-            b[27..31].copy_from_slice(&shares.to_be_bytes());
-            b[31..35].copy_from_slice(&price.to_be_bytes());
-        }
+        } => put!(old_ref, new_ref, shares, price),
         Body::Trade {
             side: s,
             shares,
@@ -401,11 +392,9 @@ pub fn encode(msg: &Message, out: &mut Vec<u8>) {
             price,
             match_number,
         } => {
-            b[19] = side(s);
-            b[20..24].copy_from_slice(&shares.to_be_bytes());
-            b[24..32].copy_from_slice(&stock.0);
-            b[32..36].copy_from_slice(&price.to_be_bytes());
-            b[36..44].copy_from_slice(&match_number.to_be_bytes());
+            put!(0u64, side(s), shares);
+            out.extend_from_slice(&stock.0);
+            put!(price, match_number);
         }
         Body::CrossTrade {
             shares,
@@ -414,16 +403,19 @@ pub fn encode(msg: &Message, out: &mut Vec<u8>) {
             match_number,
             cross_type,
         } => {
-            b[11..19].copy_from_slice(&shares.to_be_bytes());
-            b[19..27].copy_from_slice(&stock.0);
-            b[27..31].copy_from_slice(&price.to_be_bytes());
-            b[31..39].copy_from_slice(&match_number.to_be_bytes());
-            b[39] = cross_type;
+            put!(shares);
+            out.extend_from_slice(&stock.0);
+            put!(price, match_number, cross_type);
         }
         Body::Other(_) => unreachable!(),
     }
-    out.extend_from_slice(&(len as u16).to_be_bytes());
-    out.extend_from_slice(&b[..len]);
+    let written = out.len() - start;
+    assert!(
+        written <= len,
+        "type {} wrote {written} of {len} bytes",
+        kind as char
+    );
+    out.resize(start + len, 0);
 }
 
 /// Splits a byte stream into messages. Each one is a slice of the reader's buffer, valid

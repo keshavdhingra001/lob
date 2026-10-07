@@ -668,7 +668,7 @@ vs 44 / 61 / 144 for the fast book (58x at p99).
    direct-mapped table would fit, if ids were dense. Real client ids have gaps, so that's a Tier 3 gateway question.
 
 **Criterion, M6** (2026-10-07, `taskset -c 2 cargo bench --bench book -- --warm-up-time 1 --measurement-time 3`, mean ns per op,
-min–max over the 2 runs that were quiet before and after: idle 93%/84% and 94%/96%). Two more runs overlapped another session's
+min–max over the 2 runs that were quiet before and after: idle 93%/84% and 94%/96%). Two more runs overlapped another workload's
 GPU profiler (idle fell to 52%), pushed both books up 1.5–2x, and are left out. M5 columns are copied from D28's table, which
 had noisy runs, so M5 vs M6 here is a rough guide; the alternated latency A/B above is the careful comparison.
 
@@ -695,7 +695,7 @@ had noisy runs, so M5 vs M6 here is a rough guide; the alternated latency A/B ab
 - **What:** `07302019.NASDAQ_ITCH50.gz` (30 July 2019, 3.66 GB gzipped), the smallest full day on NASDAQ's public
   sample site (emi.nasdaq.com/ITCH). It lives in `data/`, which git ignores. Everything streams from the `.gz`;
   an uncompressed copy is only made to measure decompression's share (D39).
-- **Amended while building:** D35 proposed committing a small slice of the real file as a test fixture. I didn't,
+- **Changed during implementation:** D35 first proposed committing a small slice of the real file as a test fixture. It isn't committed,
   because the repo may go public and NASDAQ's redistribution terms for the samples aren't clear. The unit tests build
   their streams with `itch::encode` instead, and the whole-day run is an `#[ignore]` test that skips when the file isn't there.
 - **Why one day:** one day is about 300M messages and every kind of event (opening and closing crosses, halts). More days
@@ -719,7 +719,7 @@ had noisy runs, so M5 vs M6 here is a rough guide; the alternated latency A/B ab
 - **What:** `ItchBook` applies add / execute / cancel / delete / replace by NASDAQ's order reference number and keeps
   every symbol's visible book. It doesn't match: ITCH reports the trades NASDAQ already made, so running the
   messages through our matching engine would produce trades that never happened.
-- **Amended while building:** D37 proposed reusing the M6 ladder. That doesn't fit here. A ladder side is 264 KiB once
+- **Changed during implementation:** D37 first proposed reusing the M6 ladder. That doesn't fit here. A ladder side is 264 KiB once
   used, and about 8,900 symbols × 2 sides would be about 4.7 GB. It also requires prices on one tick grid, and stocks under $1
   are quoted in $0.0001 steps while the rest use $0.01. So each side is a `BTreeMap<price, (shares, orders)>`, and the
   order index is a `HashMap` with the M6 fmix64 hasher (D31). The M6 structures stay in the matching engine, where
@@ -733,7 +733,7 @@ had noisy runs, so M5 vs M6 here is a rough guide; the alternated latency A/B ab
   - books left crossed (bid > ask) or locked (bid == ask) after a change
   - `E` executions at the best price on the order's side, or not. ITCH names the order in each execution, so
     price-time priority says every displayed execution should be at the touch.
-- **Amended while building: the cross-unwind window.** The first full run found 21 crossed books, 19 of them on SES at 11:11:36.
+- **Added during implementation: the cross-unwind window.** The first full run found 21 crossed books, 19 of them on SES at 11:11:36.
   `lob itch ... dump SES` showed why. SES was paused (LULD, state P) at 11:06:36. At 11:11:36.761288980 NASDAQ sent the halt-cross print
   and the state change back to T *with the same timestamp*, and only then the 19 `C` executions that take out the crossed orders.
   So the feed says "trading" for about 1 µs while the auction's executions are still arriving. Each symbol now has an
@@ -757,7 +757,7 @@ E 7.58M, I 3.72M, X 2.36M, P 1.46M, F 1.30M, L 211k, C 136k, Q 17.7k, and a few 
 - **All 7,582,422 `E` executions were at the best price on their side**, in every phase; none elsewhere.
 - **0 crossed or locked books** on trading symbols outside cross-unwind windows; 21 inside them (19 SES, 2 post-market).
 - **AAPL:** opening cross $208.74 (283,525 shares, 09:30:00.17), closing cross **$208.78** (1,073,528 shares, 16:00:00.64). The
-  closing cross sets the official close. I haven't yet checked $208.78 against a published historical close (split-adjusted sites show
+  closing cross sets the official close. $208.78 hasn't yet been checked against a published historical close (split-adjusted sites show
   ÷4 prices; a search didn't find the day). At 16:00 the AAPL book was 208.85 bid / 208.89 ask, with 4,711 levels.
 
 **Throughput** (2 rounds each, both shown; the 8.7 GB uncompressed file was probably read largely from the page cache, which held about 8 GB of the 15 GB RAM, so "raw" is near memory speed and not disk speed):

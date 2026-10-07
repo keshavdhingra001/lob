@@ -51,7 +51,22 @@ pub struct Generator {
     live: Vec<Live>,
 }
 
+impl GenConfig {
+    /// The default flow with another seed.
+    pub fn with_seed(seed: u64) -> Self {
+        GenConfig {
+            seed,
+            ..GenConfig::default()
+        }
+    }
+}
+
 impl Generator {
+    /// The default flow with another seed.
+    pub fn seeded(seed: u64) -> Self {
+        Generator::new(GenConfig::with_seed(seed))
+    }
+
     pub fn new(config: GenConfig) -> Self {
         Generator {
             rng: Rng::new(config.seed),
@@ -240,12 +255,7 @@ mod tests {
         let a: Vec<Command> = Generator::new(GenConfig::default()).take(5_000).collect();
         let b: Vec<Command> = Generator::new(GenConfig::default()).take(5_000).collect();
         assert_eq!(a, b);
-        let c: Vec<Command> = Generator::new(GenConfig {
-            seed: 2,
-            ..GenConfig::default()
-        })
-        .take(5_000)
-        .collect();
+        let c: Vec<Command> = Generator::seeded(2).take(5_000).collect();
         assert_ne!(a, c);
     }
 
