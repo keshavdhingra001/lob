@@ -8,6 +8,7 @@
 //! lob gen-queue <orders> <journal>      worst case: one deep queue, cancelled in random order
 //! lob latency <journal> [runs]          per-command latency percentiles for both books
 //! lob run <ref|fast|none> <journal> [repeats]   apply only, no timing: for `perf stat` (D29)
+//! lob itch <file[.gz]> [frame|decode|book] [symbol]   replay a NASDAQ ITCH 5.0 day (D36–D39)
 //! ```
 
 use std::fs::{self, File};
@@ -42,7 +43,11 @@ usage:
   lob latency <journal> [runs]          per-command latency percentiles, both books
                                         (runs: default 5; pin it with `taskset -c <cpu>`)
   lob run <ref|fast|none> <journal> [repeats]   apply only, nothing timed or printed per command,
-                                        for `perf stat`; `none` only decodes (the baseline)";
+                                        for `perf stat`; `none` only decodes (the baseline)
+  lob itch <file[.gz]> [frame|decode|book] [symbol]   replay a NASDAQ ITCH 5.0 file: frame only,
+                                        frame + decode, or rebuild every book (default), and print
+                                        messages/s; `book` also prints the symbol's depth at 16:00
+                                        (default AAPL) and the D38 checks";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -59,6 +64,9 @@ fn main() -> ExitCode {
         ["run", book, path, repeats] => run(book, path, repeats),
         ["latency", path] => latency(path, "5"),
         ["latency", path, runs] => latency(path, runs),
+        ["itch", path] => itch_replay(path, "book", "AAPL"),
+        ["itch", path, mode] => itch_replay(path, mode, "AAPL"),
+        ["itch", path, mode, symbol] => itch_replay(path, mode, symbol),
         _ => Err(USAGE.to_string()),
     };
     match result {
@@ -276,6 +284,138 @@ fn run(book: &str, path: &str, repeats: &str) -> Result<(), String> {
         journal.commands.len()
     );
     Ok(())
+}
+
+/// Replay an ITCH file (D39). Timing lives here, outside the book, as with `lob bench`.
+fn itch_replay(path: &str, mode: &str, symbol: &str) -> Result<(), String> {
+    use lob::itch::{self, Stock};
+    use lob::itch_book::{ItchBook, Phase};
+    use lob::Side;
+
+    if !["frame", "decode", "book"].contains(&mode) {
+        return Err(format!("unknown mode `{mode}` (frame, decode or book)"));
+    }
+    let want = Stock::new(symbol);
+    let mut reader = itch::open(path.as_ref()).map_err(|e| format!("{path}: {e}"))?;
+    let err = |e: itch::ItchError| format!("{path}: {e}");
+    let mut by_type = [0u64; 256];
+    // Folded over decoded fields so the decode loop's work can't be optimized away.
+    let mut fold = 0u64;
+    let mut book = ItchBook::with_capacity(if mode == "book" { 1 << 22 } else { 0 });
+    let mut snapshot = None;
+    let start = std::time::Instant::now();
+    match mode {
+        "frame" => {
+            while let Some(b) = reader.next_frame().map_err(err)? {
+                by_type[b[0] as usize] += 1;
+            }
+        }
+        "decode" => {
+            while let Some(m) = reader.next_message().map_err(err)? {
+                fold ^= m.header.timestamp;
+            }
+        }
+        _ => {
+            while let Some(m) = reader.next_message().map_err(err)? {
+                let before = book.phase();
+                book.apply(&m)
+                    .map_err(|e| format!("message {}: {e} ({m:?})", reader.count() - 1))?;
+                if before == Phase::Market && book.phase() == Phase::Post {
+                    snapshot = book
+                        .symbols()
+                        .find(|(_, s)| s.stock == want)
+                        .map(|(_, s)| (s.depth(Side::Buy, 5), s.depth(Side::Sell, 5), s.levels()));
+                }
+            }
+        }
+    }
+    let secs = start.elapsed().as_secs_f64();
+    let n = reader.count();
+    let mb = reader.offset() as f64 / 1e6;
+    println!(
+        "{mode}: {n} messages, {mb:.0} MB uncompressed, {secs:.2} s: {:.1} M messages/s, {:.0} MB/s",
+        n as f64 / secs / 1e6,
+        mb / secs
+    );
+    if mode == "frame" {
+        let mut counts: Vec<(u64, char)> = (0..256)
+            .filter(|&t| by_type[t] > 0)
+            .map(|t| (by_type[t], t as u8 as char))
+            .collect();
+        counts.sort_by(|a, b| b.cmp(a));
+        let line: Vec<String> = counts.iter().map(|(c, t)| format!("{t} {c}")).collect();
+        println!("by type: {}", line.join(", "));
+    }
+    if mode == "decode" {
+        println!("(fold {fold:x})");
+    }
+    if mode == "book" {
+        let s = book.stats();
+        println!(
+            "book messages {}, live orders at the end {}, peak {}",
+            s.book_messages, s.live_orders, s.peak_live_orders
+        );
+        println!(
+            "crossed (pre, market, post): {:?}, after the open: {}",
+            s.crossed, s.crossed_after_open
+        );
+        println!(
+            "locked  (pre, market, post): {:?}, after the open: {}",
+            s.locked, s.locked_after_open
+        );
+        println!(
+            "E at best (pre, market, post): {:?}, not at best: {:?}; C executions: {}",
+            s.executed_at_best, s.executed_not_at_best, s.executed_with_price
+        );
+        for c in &s.examples {
+            println!(
+                "  example: {} at {} bid {} ask {}",
+                c.stock,
+                clock(c.timestamp),
+                c.bid,
+                c.ask
+            );
+        }
+        match snapshot {
+            None => {
+                println!("{symbol}: no snapshot (not in the directory, or no end of market hours)")
+            }
+            Some((bids, asks, levels)) => {
+                println!(
+                    "{symbol} at the end of market hours ({levels} levels), price  shares  orders:"
+                );
+                for (p, l) in asks.iter().rev() {
+                    println!(
+                        "  ask {:>10.4} {:>8} {:>4}",
+                        *p as f64 / 1e4,
+                        l.shares,
+                        l.orders
+                    );
+                }
+                for (p, l) in &bids {
+                    println!(
+                        "  bid {:>10.4} {:>8} {:>4}",
+                        *p as f64 / 1e4,
+                        l.shares,
+                        l.orders
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Nanoseconds since midnight as HH:MM:SS.nnnnnnnnn.
+fn clock(ns: u64) -> String {
+    let s = ns / 1_000_000_000;
+    format!(
+        "{:02}:{:02}:{:02}.{:09}",
+        s / 3600,
+        s / 60 % 60,
+        s % 60,
+        ns % 1_000_000_000
+    )
 }
 
 /// What the numbers were measured on (D27). Linux-only files; missing ones print "?".
