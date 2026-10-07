@@ -2,7 +2,8 @@
 
 Every number here comes from one session on one machine (D53), produced by `scripts/report.sh`. The raw output is in
 [`bench/results/2026-10-08-0206/`](bench/results/2026-10-08-0206/), and every table names its file. Earlier milestones' numbers in
-DESIGN.md were measured on other days and in other machine states, so compare only within this document.
+DESIGN.md were measured on other days and in other machine states, so compare only within this document. The percentile plots
+come from a second session the same day ([below](#latency-percentile-plots-m12-d60)).
 
 ## Machine and method
 
@@ -122,6 +123,42 @@ The first run's clock floors were 15–21 ns, outside the 13–15 band, so both 
   cancel and modify are 2–2.6x faster at p50.
 - **A deeper book (200k live orders) mostly hurts the reference book's cancels and modifies** (p99 499 / 631 ns, against 185 / 366 at 5k live orders):
   longer queues to scan. The fast book's cancel p99 also rises (73 → 207 ns), which fits a larger working set missing cache, but that hasn't been measured with counters.
+
+## Latency percentile plots (M12, D60)
+
+A second session, the same day with the same method, measured the latency parts again and kept each median run's whole histogram:
+[`bench/results/2026-10-08-0434/`](bench/results/2026-10-08-0434/) (commit `93d526c`; `machine.txt` there). Every clock floor is 13–15 ns.
+`gen2m` was re-run once because one of its first five runs had a 20 ns floor; both runs are in its file, and the histograms are the second run's.
+Against the tables above, the fast book's p99s moved by 1–7% (AAPL 92 ns, against 91; `deep200k` 256, against 239) and the
+reference book's by 2–15% (`queue10k` 4,183, against 3,633). That's the run-to-run spread to expect between two sessions on this laptop.
+
+The x axis adds a nine per step (90%, 99%, 99.9%...), so the tail gets as much room as the median. Both axes are logarithmic.
+The grey line is the clock floor: an empty timed window, measured on the same core in the same run. `.hgrm` files are in HdrHistogram's standard format,
+so they also load in its online plotter.
+
+![AAPL latency percentiles](bench/results/2026-10-08-0434/latency-aapl.svg)
+
+![Deep queue latency percentiles](bench/results/2026-10-08-0434/latency-queue10k.svg)
+
+Plots for [`gen2m`](bench/results/2026-10-08-0434/latency-gen2m.svg), [`deep200k`](bench/results/2026-10-08-0434/latency-deep200k.svg)
+and [`spy`](bench/results/2026-10-08-0434/latency-spy.svg) are in the same folder.
+
+All commands, ns, read from the `.hgrm` files (each line is a bucket boundary, so these can be a few ns above the tables' p99):
+
+| Journal | Reference p50 / p99 / p99.9 / p99.99 / max | Fast p50 / p99 / p99.9 / p99.99 / max | Clock floor p99.99 / max |
+|---|---|---|---|
+| AAPL | 82 / 245 / 785 / 2,989 / 277,503 | 46 / 94 / 380 / 2,573 / 359,679 | 204 / 107,455 |
+| SPY | 78 / 165 / 676 / 9,727 / 138,623 | 44 / 89 / 386 / 8,439 / 124,415 | 442 / 18,447 |
+| `gen2m` | 52 / 244 / 489 / 2,571 / 133,759 | 40 / 176 / 474 / 2,433 / 128,767 | 213 / 118,975 |
+| `deep200k` | 45 / 358 / 999 / 10,319 / 566,271 | 39 / 266 / 847 / 7,875 / 195,711 | 1,282 / 128,447 |
+| `queue10k` | 73 / 4,215 / 6,695 / 140,031 / 142,207 | 36 / 120 / 906 / 45,023 / 64,831 | 15 / 1,642 |
+
+- **Up to p99.9 the fast book is lower on real flow:** about 2x at p50 and p99 on AAPL and SPY.
+- **Past p99.99 the two books meet** on every journal except the deep queue, and the clock floor climbs with them (0.2–1.3 µs at p99.99, 18–128 µs max).
+  An empty timed window can't be slow because of the code in it, so this part of the tail is the machine: interrupts, preemption, frequency changes.
+  Making it smaller needs isolated cores (`isolcpus`, `nohz_full`), not a faster book. This is why the tables stop at p99.9.
+- **The deep queue is where the structure shows across the whole curve.** The reference book's cancels scan the queue, so its line leaves the fast book's
+  near p30 and reaches 4.2 µs at p99. The fast book stays at 36–120 ns up to p99. Only 20,000 commands, so above p99.9 each point is a handful of samples.
 
 ## Market data cost ([`feed.txt`](bench/results/2026-10-08-0206/feed.txt))
 Apply, then publish level updates and trades, then encode (D40–D43). Fast book, best of 5, alternated with apply-only runs.

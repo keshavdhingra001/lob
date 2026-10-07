@@ -1,24 +1,82 @@
 # lob design
 
-Living document. Every non-obvious decision gets a short entry: **what**, **alternatives**, **why**.
+Every non-obvious decision has an entry below: **what**, **alternatives**, **why**. The entries are in the order the decisions were made (D58),
+so later ones sometimes replace earlier ones, and each replaced entry says what replaced it. Numbers come from dated results sections and
+[BENCHMARKS.md](BENCHMARKS.md), each tied to raw output in `bench/results/`.
 
-## Architecture (target, after M9)
+## Overview (as built)
 
 ```
-clients ──> gateway thread ──SPSC ring──> matching thread ──SPSC ring──> market data / journal
-                 │                         (one per symbol)                    │
-                 └── decode + validate     Command in, Events out          L2 updates, trades
-                                           pure, deterministic             command journal (replay)
+ journal file ──> gateway thread ──SPSC ring──> matching thread ──SPSC ring──> output thread
+ (D15; ITCH       decode, stamp                 fast book: apply()             encode + digest (D17)
+  via D54)        (D46, D48)                    Command in, Events out         L2 feed publisher (D40)
+                                                no clock, no I/O (D4)          end-to-end latency (D48)
 ```
 
-Since M9, the engine runs as three threads joined by SPSC rings (D45–D48), with output identical to one thread.
-Since M8, a publisher turns the events into an L2 feed (D40–D44). Before that (M5): two books behind the `OrderBook` trait: the reference book (D8), matching by D9 with modify
-(D11), IOC/FOK/post-only (D12) and instrument rules (D14). Checked by scenario scripts, an
-invariant checker (D10) and an event-only conservation ledger over random sessions (D13).
-Input is recorded in a binary journal (D15, D16); replay produces a sequenced event stream and a
-digest (D17). A seeded generator (D18) supplies realistic order flow. The fast book (D19–D21)
-produces identical events, proven by differential testing over 15M commands (D22). A latency
-harness outside the engine (D23–D27) and criterion benches (D28) measure both books per command kind.
+- **The engine** is one call, `OrderBook::apply(&Command, &mut Vec<Event>)`: deterministic (D4), with no allocation once warm (D5, D32).
+  It has two implementations that must emit identical events. The **reference book** (D8) is a `BTreeMap` of `VecDeque`s, written to be
+  obviously correct. The **fast book** (D19–D21, D30–D34) uses a slab of orders, an intrusive list per level, a tick-indexed price ladder
+  with a bitmap, and O(1) cancel.
+- **Matching:** price-time priority, trades at the maker's price (D9), modify with exchange priority rules (D11), IOC / FOK / post-only (D12),
+  tick and max-quantity checks (D14).
+- **Input and output:** a checksummed binary command journal (D15, D16); a sequence-numbered event stream with a 64-bit digest (D17);
+  an L2 feed with gap recovery (D40–D44); a three-thread pipeline whose output equals one thread's byte for byte (D45–D47).
+- **How it's checked:** scenario scripts and an invariant checker (D10), a conservation ledger built from events alone (D13), differential
+  testing of the two books over 15M commands (D22), property tests (D49–D52), mutation checks of every milestone, a real NASDAQ day
+  replayed with zero errors (D37, D38), and our matching compared with NASDAQ's on real executions (D54).
+- **How it's measured:** a timing harness outside the engine (D23–D27), criterion (D28), `perf` (D29), coordinated-omission-safe pipeline
+  latency (D48), and one reproducible report (D53–D57) with percentile plots (D60).
+
+## Decisions by topic
+
+| Topic | Entries |
+|---|---|
+| Core model: prices, ids, determinism, output buffer, text format | D2–D6 |
+| Matching rules and order types | D9, D11, D12, D14, D30 |
+| Reference book | D8 |
+| Fast book | D19–D21, D31, D33, D34 |
+| No allocation on the hot path | D5, D32 |
+| Journal, replay, digest | D15–D17 |
+| Test oracles and generated flow | D10, D13, D18, D22, D49–D52 |
+| Latency and profiling | D23–D29, D48, D55, D60 |
+| Real market data (NASDAQ ITCH 5.0) | D35–D39, D54 |
+| Market data out | D40–D44 |
+| Threads | D7, D45–D47 |
+| Reporting and this document | D53, D56–D59, D61–D63 |
+
+**Common questions, and where they're answered:**
+- Why integer prices? D2. Why do clients pick order ids, and why must they increase? D3, D30.
+- How is cancel O(1)? D20, D21, then D33 for the price ladder.
+- How do you know the fast book is right? D22 (differential testing), D50 (properties), D10 and D13 (oracles).
+- Why is matching single-threaded, and what did three threads buy? D7, D46, M9 results (nothing at full load: the output stage dominates).
+- What makes replay deterministic, given a randomly seeded `HashMap`? D4, D17, D21.
+- How is tail latency measured honestly? D25 (the clock's own cost), D27 (method), D48 (coordinated omission).
+- Where does the time go? D29, M5 and M6 results.
+- Does the matching agree with a real exchange? D54, M11 results.
+
+## Not built (D61)
+
+What a production exchange has that this engine doesn't, and where each would go:
+- **A network gateway and wire protocol** (FIX, or a binary protocol like Nasdaq's OUCH, over TCP). Input today is a journal file. A socket reader
+  would replace the journal decoder in the gateway thread (D46). Every latency here is in-process: no network, no kernel bypass.
+- **More than one symbol.** One book per symbol, symbols sharded across matching threads, a ring per shard (D7). Built for one symbol only.
+- **Auctions** (the opening and closing cross). ITCH cross executions only remove shares (D54).
+- **Hidden, iceberg, pegged and stop orders.** The FOK pre-scan (D12) is correct only because all quantity is visible.
+- **Self-trade prevention.** Needs an owner field on every order (D12), and so a new journal version (D15).
+- **Pre-trade risk** beyond the fat-finger quantity limit: position and notional limits (D14).
+- **Crash recovery and replicas.** The journal is a recording, not a WAL: it isn't fsynced (D15). Recovery would be "replay the journal" (D4),
+  but there are no book snapshots to start from, and no replica.
+- **Arbitrary client ids.** Ids must increase per session (D30). A gateway would map client ids to internal increasing ones.
+- **Timestamps on events.** The engine never reads a clock (D4). A gateway would put a time inside each command, and events would carry it.
+- **Entry-time priority for orders displayed late**, which NASDAQ has (M11 results). The engine only sees arrival order.
+- **Per-thread core pinning** (D46; `taskset` pins the process) and a **proof of the ring's memory ordering** (D45: loom, or an ARM machine).
+
+## Future work (D63)
+
+- Top-N or incremental snapshots: full-depth recovery moved 1.14 GB for a 42 MB AAPL feed (M11 results).
+- `perf stat` on the fast book's cancel p99 in the deep200k journal (BENCHMARKS.md).
+- The ITCH runs with a controlled page cache (M7's throughput depends on whether the file is cached).
+- cargo-fuzz targets and Miri over the `unsafe` in the ring. Both need nightly Rust (D49).
 
 ## Decisions
 
@@ -56,7 +114,7 @@ harness outside the engine (D23–D27) and criterion benches (D28) measure both 
 ### D5: Caller-owned output buffer
 - **What:** `apply(&mut self, cmd: &Command, out: &mut Vec<Event>)` appends to `out` instead of returning a `Vec`.
 - **Why:** returning a new `Vec` allocates on every command. With a reused buffer the steady
-  state allocates nothing, which M6 will prove with a counting allocator.
+  state allocates nothing, proved in M6 with a counting allocator (D32).
 
 ### D6: Text command format (for the REPL and tests)
 - **What:** one command per line: `limit <id> <side> <qty> <price>`, `market <id> <side> <qty>`,
@@ -65,7 +123,7 @@ harness outside the engine (D23–D27) and criterion benches (D28) measure both 
 - **Why:** readable scenario files and REPL sessions. The binary journal format for replay is a
   separate decision in M3, where size and decode speed matter.
 
-### D7: Single-threaded matching per symbol (planned, revisit in M9)
+### D7: Single-threaded matching per symbol (built in M9 as D46)
 - **What:** one thread owns a book. Concurrency lives at the edges (gateway decode, market data
   fan-out), connected by single-producer single-consumer ring buffers.
 - **Alternatives:** locks around a shared book; concurrent data structures inside the book.
@@ -83,7 +141,7 @@ harness outside the engine (D23–D27) and criterion benches (D28) measure both 
   correct, not fast. M4's fast book must produce identical events.
 - **Rejected alternatives:**
   - Storing each order's index in its queue: an index shifts whenever an order ahead of it leaves.
-  - A sorted `Vec` of levels: O(P) inserts. A tick-indexed array is what M6 measures.
+  - A sorted `Vec` of levels: O(P) inserts. A tick-indexed array is what M6 built (D33).
 
 ### D9: Matching rules (M1)
 - **Price-time priority:** best price first. Within a price, the oldest order goes first, and a
@@ -102,7 +160,7 @@ harness outside the engine (D23–D27) and criterion benches (D28) measure both 
   is done. Otherwise a late cancel meant for the old order could hit the new one. The `used` set
   grows with the session. **Superseded in M6 by D30** (ids must increase), after M5 measured the
   set at 37% of the fast book's time and as the cause of its multi-ms worst case.
-- **Not yet:** modify, IOC/FOK/post-only, tick size (M2); self-trade prevention (Tier 3).
+- **Added later:** modify, IOC/FOK/post-only and tick size in M2 (D11, D12, D14). Self-trade prevention is not built (see Not built).
 
 ### D10: Scenario tests (M1)
 - **What:** `tests/scenarios/*.txt` are scripts in the D6 format. Each command is followed by its
@@ -131,7 +189,7 @@ harness outside the engine (D23–D27) and criterion benches (D28) measure both 
     LSE) resets priority on a size increase or a price change.
 - **Open quantity, not total quantity:** FIX cancel/replace sends the *total* order quantity, and
   the exchange subtracts what's already filled. That races with fills in flight (the client
-  doesn't know about a fill yet). Open quantity is simpler and explicit; a gateway (Tier 3) would
+  doesn't know about a fill yet). Open quantity is simpler and explicit; a gateway (not built) would
   translate.
 - **Rejects:** unknown or finished order, zero quantity (cancel is the explicit way out), the
   validation rules (D14), and a post-only order whose new price would cross (D12).
@@ -150,7 +208,7 @@ harness outside the engine (D23–D27) and criterion benches (D28) measure both 
 - **Post-only:** rejected `would-cross` if it would trade on arrival, so its id stays free.
   The flag is remembered on the resting order, so a later modify can't turn it into a taker.
   - **Alternative:** "slide": reprice it one tick behind the touch. That's common on crypto venues, but it means the engine picks prices for the client.
-- **Self-trade prevention:** moved to Tier 3. It needs an owner/account field on every order, which is a format change best done together with a binary gateway protocol.
+- **Self-trade prevention:** not built (see Not built). It needs an owner/account field on every order, which is a format change best done together with a binary gateway protocol.
 
 ### D13: Conservation ledger (M2)
 - **What:** `Ledger` rebuilds every live order's open quantity from the commands and events
@@ -176,7 +234,7 @@ harness outside the engine (D23–D27) and criterion benches (D28) measure both 
   (and for post-only, would-cross). Only one reason is reported, so the order is part of the contract.
 - **Why in the engine:** the tick grid is a property of the book (levels must sit on it, and
   the invariant checker verifies they do). Max qty is the classic fat-finger guard
-  (Knight Capital and others). Broader pre-trade risk (position and notional limits) is Tier 3.
+  (Knight Capital and others). Broader pre-trade risk (position and notional limits) is not built.
 - **Scenario support:** a `config <tick> <max>` line starts a fresh book under those rules
   (`OrderBook::with_config`), so every book implementation can be built the same way.
 - **Mutation-checked (M2):** 12 planted bugs, all caught:
@@ -199,7 +257,7 @@ harness outside the engine (D23–D27) and criterion benches (D28) measure both 
 - **Version field:** a future format (an owner field for self-trade prevention, timestamps) can
   coexist with old recordings instead of silently misreading them.
 - **Not a WAL:** the journal is a recording of input, written with a `BufWriter` and never fsynced
-  per record. Crash-safe journaling for recovery is Tier 3, and lsmkv's group commit is the model for it.
+  per record. Crash-safe journaling for recovery is not built, and lsmkv's group commit is the model for it.
 
 ### D16: Damaged journals
 - **Torn tail** (the file ends inside a record, or the *last* record fails its CRC): replay the
@@ -260,8 +318,8 @@ harness outside the engine (D23–D27) and criterion benches (D28) measure both 
 - **What:** `Slab<T>` is a `Vec<T>` plus a free list of indices. Orders and price levels live in
   slabs and refer to each other by `u32` index. A removed slot is reused by the next insert.
 - **Why:**
-  - Once the book is warm, resting an order reuses a slot instead of allocating. M6 will prove zero
-    allocations per command with a counting allocator.
+  - Once the book is warm, resting an order reuses a slot instead of allocating. M6 proved zero
+    allocations per command with a counting allocator (D32).
   - Nodes are contiguous, so walking a queue touches nearby memory more often than `Box`ed nodes scattered over the heap.
   - `u32` indices are half the size of pointers and need no `unsafe`.
 - **Cost:** a stale index after removal would silently point at a reused slot (the slab
@@ -284,7 +342,7 @@ harness outside the engine (D23–D27) and criterion benches (D28) measure both 
   level. It's updated when a better level is created, and recomputed from the price tree only
   when the best level empties.
 - **Why:** matching asks "what's the best level?" for every level it sweeps. The cache makes that
-  a load instead of a tree search. The tree stays the source of truth (a tick-indexed array is M6).
+  a load instead of a tree search. The tree stays the source of truth (until M6 replaced it with a tick-indexed ladder, D33).
 - **Determinism:** `HashMap` uses a random hash seed per process, but the engine only looks up
   and removes by key and never iterates it, so output can't depend on the seed (D4).
 
@@ -305,7 +363,7 @@ harness outside the engine (D23–D27) and criterion benches (D28) measure both 
   - filled orders left in the index, or the post-only flag lost on a modify
   - no slot reuse, or a modify that always keeps priority
   - broken tail or prev links
-- **Throughput** (`lob bench`, release, best of 5, one core; "apply" excludes event encoding and hashing):
+- **Throughput** (2026-10-04, `lob bench`, release, best of 5, one core; "apply" excludes event encoding and hashing):
 
   | Workload | Reference | Fast | Speedup |
   |---|---|---|---|
@@ -521,7 +579,7 @@ vs 44 / 61 / 144 for the fast book (58x at p99).
 - **Real venues:** Nasdaq's OUCH requires each order's `UserRefNum` to be greater than the last one on the session;
   FIX only requires `ClOrdID` to be unique. Clients generate ids from a counter anyway.
 - **Cost:** a client that sends ids out of order now gets rejected. A gateway that accepts
-  arbitrary client ids could map them to increasing internal ids. That's a gateway job (Tier 3), not the book's.
+  arbitrary client ids could map them to increasing internal ids. That's a gateway job (not built), not the book's.
 - **Checked:**
   - The golden digest didn't change, because generated ids always increased.
   - `06_rejects.txt` now also covers a gap being accepted, a lower never-used id being rejected, and a rejected id not raising the bar.
@@ -545,6 +603,25 @@ vs 44 / 61 / 144 for the fast book (58x at p99).
   would cost nothing in determinism. Fixed constants keep the table layout, and so
   the performance, reproducible across runs. Behind an authenticated gateway with increasing ids
   (D30) the risk is small; a per-process seed is a one-line change if it isn't.
+
+### D32: Proof of zero allocations per command
+- **What:** `tests/alloc.rs` installs a counting `#[global_allocator]` that wraps `System`. It counts `alloc`, `alloc_zeroed` and
+  `realloc` in a thread-local `Cell`, which is `const`-initialised with no destructor, so counting can't itself allocate,
+  and parallel tests don't mix their counts.
+  - After 10,000 warm-up commands, the fast book must apply the next 990,000 with **zero** allocations.
+  - That's checked on three generated sessions, one of them with up to 200,000 live orders.
+  - The reference book runs in the same harness and must allocate more than 1,000 times, so the test can't pass because nothing was counted.
+- **`FastBook::with_capacity(config, orders)`** reserves the order and level slabs, their free lists and the
+  id index at startup, the way exchanges size their pools before the open. `with_config` is
+  `with_capacity(config, 0)`. The ladder windows are allocated by each side's first order, during warm-up.
+- **What made zero possible:**
+  - D30: no set that grows with every id
+  - D33: no `BTreeMap` node for each new price level
+  - the slab free lists (D19), and caller-owned event buffers (D5)
+- **What still allocates, by design:** prices outside the ladder window (the overflow tree), growth past the reserved
+  capacity, and `depth()` (it returns a `Vec`, and it's a query, not the matching path).
+- **Mutation-checked:** 3 planted bugs, all caught: no reservation (`with_config` in the test), the index not reserved, and a
+  `format!` hidden in `rest` (wrapped in `black_box` so the optimizer can't remove the allocation).
 
 ### D33: Tick-indexed price ladder (fast book)
 - **What:** `src/ladder.rs`, one `Ladder` per side:
@@ -581,25 +658,6 @@ vs 44 / 61 / 144 for the fast book (58x at p99).
   searched on the wrong side), all caught after a fix. The `depth(n)` bug survived at first because every test asked for
   unlimited depth; the differential test now compares `depth(side, 0)` and `depth(side, 3)` too. A fourth planted change
   (`return true` past the FOK limit) behaved exactly like the original code, since every later level is past the limit as well, so it was replaced.
-
-### D32: Proof of zero allocations per command
-- **What:** `tests/alloc.rs` installs a counting `#[global_allocator]` that wraps `System`. It counts `alloc`, `alloc_zeroed` and
-  `realloc` in a thread-local `Cell`, which is `const`-initialised with no destructor, so counting can't itself allocate,
-  and parallel tests don't mix their counts.
-  - After 10,000 warm-up commands, the fast book must apply the next 990,000 with **zero** allocations.
-  - That's checked on three generated sessions, one of them with up to 200,000 live orders.
-  - The reference book runs in the same harness and must allocate more than 1,000 times, so the test can't pass because nothing was counted.
-- **`FastBook::with_capacity(config, orders)`** reserves the order and level slabs, their free lists and the
-  id index at startup, the way exchanges size their pools before the open. `with_config` is
-  `with_capacity(config, 0)`. The ladder windows are allocated by each side's first order, during warm-up.
-- **What made zero possible:**
-  - D30: no set that grows with every id
-  - D33: no `BTreeMap` node for each new price level
-  - the slab free lists (D19), and caller-owned event buffers (D5)
-- **What still allocates, by design:** prices outside the ladder window (the overflow tree), growth past the reserved
-  capacity, and `depth()` (it returns a `Vec`, and it's a query, not the matching path).
-- **Mutation-checked:** 3 planted bugs, all caught: no reservation (`with_config` in the test), the index not reserved, and a
-  `format!` hidden in `rest` (wrapped in `black_box` so the optimizer can't remove the allocation).
 
 ### D34: Order and level layout, and the crossing-limit tail
 - **What:** `Node` (id, qty, level, prev, next, post-only) and `LevelNode` (price, side, head, tail,
@@ -666,7 +724,7 @@ vs 44 / 61 / 144 for the fast book (58x at p99).
 5. **Criterion agrees** (table below): the fast book's add is 3–4x cheaper than in M5 at every depth, because the used-id set is gone.
    The reference book's add halved for the same reason, since it gained D30 as well. That resolves D28's caveat.
 6. **The id index is now the biggest single matching cost** (21% for insert plus remove). With increasing ids (D30) a
-   direct-mapped table would fit, if ids were dense. Real client ids have gaps, so that's a Tier 3 gateway question.
+   direct-mapped table would fit, if ids were dense. Real client ids have gaps, so that's a question for a gateway (not built).
 
 **Criterion, M6** (2026-10-07, `taskset -c 2 cargo bench --bench book -- --warm-up-time 1 --measurement-time 3`, mean ns per op,
 min–max over the 2 runs that were quiet before and after: idle 93%/84% and 94%/96%). Two more runs overlapped another workload's
@@ -714,7 +772,7 @@ had noisy runs, so M5 vs M6 here is a rough guide; the alternated latency A/B ab
 - **Tests:** two messages written out byte by byte from the spec's tables (so an offset that's wrong in both
   `encode` and `decode` still fails), round trips for every decoded type with extreme values (including a 48-bit
   timestamp), and a reader fed 1, 2, 3, 7, ... bytes at a time so messages straddle reads and the buffer's end.
-- **Dependency:** `flate2` with the `zlib-rs` backend (pure Rust; the default `miniz_oxide` is slower to inflate).
+- **Dependency:** `flate2` with the `zlib-rs` backend (pure Rust). It was picked over the default `miniz_oxide` for inflate speed on the strength of zlib-rs's own published benchmarks; that wasn't measured here.
 
 ### D37: A separate `ItchBook` that replays the exchange's book
 - **What:** `ItchBook` applies add / execute / cancel / delete / replace by NASDAQ's order reference number and keeps
@@ -782,10 +840,10 @@ E 7.58M, I 3.72M, X 2.36M, P 1.46M, F 1.30M, L 211k, C 136k, Q 17.7k, and a few 
 - **What:** a `Publisher` (`src/feed.rs`) reads each command and its events, as the ledger (D13) does, and keeps its own
   aggregated book: one `BTreeMap<Price, Level>` per side plus each resting order's side, price and open quantity.
   It never looks inside a book, so it works the same behind either one.
-- **Alternatives:** (a) the books emit level changes themselves. That's faster, but it adds work to the hot path and
+- **Alternatives:** (a) the books emit level changes themselves. That saves a second pass over the events, but it adds work to the hot path and
   to both books, which must stay independent (D22). (b) Diff `depth()` before and after every command. That's
   obviously correct, but it costs O(book) per command. It's used as the test oracle instead.
-- **Why:** in the target architecture market data sits behind the output ring (M9), on another thread, and sees only events.
+- **Why:** market data sits behind the output ring (built in M9, D46), on another thread, and sees only events.
   The engine stays exactly as it is.
 - **How a taker becomes resting:** an accepted order (or a modified one, which D11 lets trade) is held as the
   command's *pending taker*. Trades reduce it and its makers. A `cancelled` for it drops it. Whatever is left at the end of the command
@@ -1055,7 +1113,7 @@ the ITCH rebuild rate (M7) and criterion (M6). Every raw output starts with a ma
 - **Alternative:** have the script generate the markdown. That's more code to maintain and defend, and the written conclusions still need a person.
 
 ### D57: No charts in M11
-Tables only. Percentile plots can be added in M12 if they're wanted.
+Tables only. Percentile plots came in M12 (D60).
 
 ### M11 results (2026-10-08)
 All numbers are in [BENCHMARKS.md](BENCHMARKS.md), with the raw output in `bench/results/2026-10-08-0206/`. The ones that change earlier conclusions:
@@ -1099,3 +1157,12 @@ Every "faster" or number in README and DESIGN.md links to a raw output file or a
 
 ### D63: Follow-ups stay follow-ups
 Top-N snapshots (M11's 1.14 GB recovery), `perf stat` on deep200k's cancel p99, and ITCH with a controlled page cache are listed as future work, not built in M12.
+
+### M12 results (2026-10-08)
+- **Percentile plots (D60):** `lob latency ... <dir>` and `lob plot`, 8 tests, 18 planted bugs all caught. The first batch had 5 survivors:
+  3 needed tests (the hgrm's 3-column last line, axes rounding out partial decades, a series inside one decade) and 1 was equivalent
+  (a special case for p100 that `min` already handled, so the special case was removed). Plots and histograms for all five journals are in
+  `bench/results/2026-10-08-0434/`, described in [BENCHMARKS.md](BENCHMARKS.md#latency-percentile-plots-m12-d60).
+- **What the plots show that the tables didn't:** past p99.99 the two books meet, and the empty clock window climbs with them
+  (0.2–1.3 µs at p99.99, up to 128 µs max). That part of the tail is the machine, not the book; only isolated cores would shrink it.
+  The deep queue is the exception: the reference book's cancel scans pull its curve away from the fast book's from about p30 on.
