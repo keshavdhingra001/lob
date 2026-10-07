@@ -302,10 +302,8 @@ impl Publisher {
             .orders
             .checked_sub(gone as usize)
             .ok_or("level has no orders")?;
+        // Every resting order has some quantity open, so a level at 0 has no orders left.
         if level.qty.0 == 0 {
-            if level.orders != 0 {
-                return Err("an empty level still has orders".into());
-            }
             match side {
                 Side::Buy => self.bids.remove(&price),
                 Side::Sell => self.asks.remove(&price),
@@ -593,29 +591,40 @@ mod tests {
 
     #[test]
     fn inconsistent_events_are_errors() {
-        let cmd: Command = "limit 1 buy 5 99".parse().unwrap();
-        let mut p = Publisher::new();
-        let mut out = Vec::new();
-        let unknown = Event::Cancelled {
-            id: OrderId(9),
-            remaining: Qty(1),
+        // A publisher with order 1 resting: buy 5 at 99.
+        let buy: Command = "limit 1 buy 5 99".parse().unwrap();
+        let resting = || {
+            let mut p = Publisher::new();
+            let accepted = Event::Accepted { id: OrderId(1) };
+            p.on_command(&buy, &[accepted], &mut Vec::new()).unwrap();
+            p
         };
-        assert!(p.on_command(&cmd, &[unknown], &mut out).is_err());
+        let run = |cmd: &str, events: &[Event]| {
+            let cmd: Command = cmd.parse().unwrap();
+            resting()
+                .on_command(&cmd, events, &mut Vec::new())
+                .unwrap_err()
+        };
+        let cancelled = |id, qty| Event::Cancelled {
+            id: OrderId(id),
+            remaining: Qty(qty),
+        };
+        assert!(run("cancel 9", &[cancelled(9, 1)]).ends_with("order isn't live"));
+        assert!(run("cancel 1", &[cancelled(1, 4)]).ends_with("5 was open"));
 
-        let mut p = Publisher::new();
-        let accepted = Event::Accepted { id: OrderId(1) };
-        p.on_command(&cmd, &[accepted], &mut out).unwrap();
-        let cancel = Command::Cancel { id: OrderId(1) };
-        let wrong = Event::Cancelled {
-            id: OrderId(1),
-            remaining: Qty(4),
-        };
-        assert!(p.on_command(&cancel, &[wrong], &mut out).is_err());
-        let market: Command = "market 2 sell 1".parse().unwrap();
         let accepted = Event::Accepted { id: OrderId(2) };
-        assert_eq!(
-            p.on_command(&market, &[accepted], &mut out),
-            Err("market order 2 left open".into())
+        let trade = |price| Event::Trade {
+            taker: OrderId(2),
+            maker: OrderId(1),
+            taker_side: Side::Sell,
+            qty: Qty(1),
+            price: Price(price),
+        };
+        assert!(
+            run("market 2 sell 1", &[accepted, trade(98)]).ends_with("not at the maker's price")
+        );
+        assert!(
+            run("market 2 sell 9", &[accepted, trade(99)]).ends_with("market order 2 left open")
         );
     }
 
