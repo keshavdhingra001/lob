@@ -724,3 +724,55 @@ had noisy runs, so M5 vs M6 here is a rough guide; the alternated latency A/B ab
   are quoted in $0.0001 steps while the rest use $0.01. So each side is a `BTreeMap<price, (shares, orders)>`, and the
   order index is a `HashMap` with the M6 fmix64 hasher (D31). The M6 structures stay in the matching engine, where
   one symbol and one tick size hold.
+
+### D38: How the rebuilt book is checked
+- **Hard errors** (replay stops): an execute / cancel / delete / replace for an order that isn't live, an add or
+  replace onto a live reference, a fill or cancel larger than what's left, a message whose locate differs from its
+  order's, an add for a locate with no directory entry, a 0-share add.
+- **Counted, by phase** (pre-market, market hours, post-market), on symbols in state T only:
+  - books left crossed (bid > ask) or locked (bid == ask) after a change
+  - `E` executions at the best price on the order's side, or not. ITCH names the order in each execution, so
+    price-time priority says every displayed execution should be at the touch.
+- **Amended while building: the cross-unwind window.** The first full run found 21 crossed books, 19 of them on SES at 11:11:36.
+  `lob itch ... dump SES` showed why. SES was paused (LULD, state P) at 11:06:36. At 11:11:36.761288980 NASDAQ sent the halt-cross print
+  and the state change back to T *with the same timestamp*, and only then the 19 `C` executions that take out the crossed orders.
+  So the feed says "trading" for about 1 µs while the auction's executions are still arriving. Each symbol now has an
+  `uncrossing` flag, set by any cross print and cleared by its next book message that isn't a `C`. Crossings inside
+  that window are counted on their own (`crossed_while_uncrossing`) and not as anomalies. A test replays the SES
+  sequence, and 3 planted bugs in the flag are caught.
+- **Why not compare with a third-party snapshot:** nobody publishes NASDAQ order-book snapshots for the sample days.
+  The closest external check is the closing-cross price (see the M7 results).
+
+### D39: Throughput, measured three ways
+`lob itch <file> frame | decode | book` times framing alone, framing plus decoding, and the full rebuild, from the `.gz`
+or from an uncompressed copy. Timing is in `main`, outside the parser and book, as with `lob bench`.
+
+### M7 results (2026-10-07, quiet machine: idle ≥95% before and after every run, `taskset -c 2`, i7-1165G7)
+**The day:** 282,229,684 messages, 8.66 GB uncompressed (3.66 GB gzipped), 8,849 symbols. By type: A 124.2M, D 120.0M, U 21.3M,
+E 7.58M, I 3.72M, X 2.36M, P 1.46M, F 1.30M, L 211k, C 136k, Q 17.7k, and a few thousand Y, H, R.
+
+**Correctness (D38):**
+- **No hard errors** in 276,789,789 book messages, and **0 live orders at the end**: every one of the 125.5M orders added was later executed,
+  cancelled or deleted, with share counts that add up. Peak live orders: 1,964,977. Peak memory (RSS) 234 MB.
+- **All 7,582,422 `E` executions were at the best price on their side**, in every phase; none elsewhere.
+- **0 crossed or locked books** on trading symbols outside cross-unwind windows; 21 inside them (19 SES, 2 post-market).
+- **AAPL:** opening cross $208.74 (283,525 shares, 09:30:00.17), closing cross **$208.78** (1,073,528 shares, 16:00:00.64). The
+  closing cross sets the official close. I haven't yet checked $208.78 against a published historical close (split-adjusted sites show
+  ÷4 prices; a search didn't find the day). At 16:00 the AAPL book was 208.85 bid / 208.89 ask, with 4,711 levels.
+
+**Throughput** (2 rounds each, both shown; the 8.7 GB uncompressed file was probably read largely from the page cache, which held about 8 GB of the 15 GB RAM, so "raw" is near memory speed and not disk speed):
+
+| Mode | Uncompressed | From `.gz` |
+|---|---|---|
+| frame | 43.3 / 42.6 M msg/s (1.33 GB/s) | 12.0 / 11.9 M msg/s |
+| frame + decode | 29.1 / 28.7 M msg/s | 10.8 / 10.7 M msg/s |
+| full book rebuild | **3.8 / 3.8 M msg/s** (73 s) | 3.1 / 3.1 M msg/s (91 s) |
+
+**What the numbers say:**
+1. **The book, not gzip, is the bottleneck.** D39 predicted gzip would dominate; it doesn't. From the raw file, the rebuild costs
+   about 225 ns per message on top of decoding (63.5 s over 282M), while inflating adds about 60 ns (17 s). Framing alone runs at 23 ns per message.
+2. **225 ns per message is about 5x the matching engine's 42 ns p50** (M6). That's the price of D37's general structures: a `BTreeMap`
+   per side and a 2M-entry `HashMap` (tens of MB of order index plus scattered tree nodes, well beyond the 12 MB LLC), touched in reference order,
+   which is effectively random. Not measured further yet: `perf stat` on LLC misses would confirm or refute it. Options: a per-symbol price
+   ladder sized by tick (sub-dollar stocks need their own grid), or a dense order table, since references only increase through the day.
+3. **Decoding is cheap:** 34 ns per message for frame + decode, against 23 ns for frame only.

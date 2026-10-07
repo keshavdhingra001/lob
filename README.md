@@ -107,7 +107,19 @@ After M6 (zero allocations, increasing ids, a price ladder), on the same 2M gene
 
 The 10 ms worst case was a set of every order id ever used, rehashing as it grew. Details are in [DESIGN.md](DESIGN.md) (D30–D34, M6 results).
 
+M7 replays a real NASDAQ TotalView-ITCH 5.0 day (30 July 2019, 282M messages) and rebuilds the book of every symbol:
+
+| | |
+|---|---|
+| Errors (unknown order, overfill, wrong symbol) | 0 in 277M book messages |
+| Orders left at the end of the day | 0 of 125.5M added |
+| `E` executions at the best price | 7,582,422 of 7,582,422 |
+| Crossed books outside auction unwinds | 0 |
+| Throughput: frame / decode / full rebuild | 43 / 29 / 3.8 M messages/s (uncompressed); rebuild 3.1 M/s from `.gz` |
+
+`lob itch <file> [frame|decode|book|dump] [symbol]`. The sample files are at emi.nasdaq.com/ITCH and aren't in the repo.
+Details are in [DESIGN.md](DESIGN.md) (D35–D39, M7 results).
+
 ## Planned
 
-- Replay of a real NASDAQ ITCH session.
 - A lock-free pipeline between gateway, matching and market data threads.
