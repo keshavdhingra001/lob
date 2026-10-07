@@ -6,6 +6,7 @@ pub mod book;
 pub mod command;
 pub mod error;
 pub mod fast;
+pub mod feed;
 pub mod gen;
 pub mod hash;
 pub mod itch;

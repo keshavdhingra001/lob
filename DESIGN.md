@@ -776,3 +776,65 @@ E 7.58M, I 3.72M, X 2.36M, P 1.46M, F 1.30M, L 211k, C 136k, Q 17.7k, and a few 
    which is effectively random. Not measured further yet: `perf stat` on LLC misses would confirm or refute it. Options: a per-symbol price
    ladder sized by tick (sub-dollar stocks need their own grid), or a dense order table, since references only increase through the day.
 3. **Decoding is cheap:** 34 ns per message for frame + decode, against 23 ns for frame only.
+
+### D40: Market data is built from the event stream, outside the engine (M8)
+- **What:** a `Publisher` (`src/feed.rs`) reads each command and its events, as the ledger (D13) does, and keeps its own
+  aggregated book: one `BTreeMap<Price, Level>` per side plus each resting order's side, price and open quantity.
+  It never looks inside a book, so it works the same behind either one.
+- **Alternatives:** (a) the books emit level changes themselves. That's faster, but it adds work to the hot path and
+  to both books, which must stay independent (D22). (b) Diff `depth()` before and after every command. That's
+  obviously correct, but it costs O(book) per command. It's used as the test oracle instead.
+- **Why:** in the target architecture market data sits behind the output ring (M9), on another thread, and sees only events.
+  The engine stays exactly as it is.
+- **How a taker becomes resting:** an accepted order (or a modified one, which D11 lets trade) is held as the
+  command's *pending taker*. Trades reduce it and its makers. A `cancelled` for it drops it. Whatever is left at the end of the command
+  rests at its price. Only then does it count towards a level.
+
+### D41: Absolute, price-keyed level updates, coalesced per command
+- **What:** each update carries a level's new total, `(side, price, qty, orders)`, and qty 0 means the level is gone.
+  Updates are collected over the whole command. Only levels whose final state differs from their state before the command
+  are sent, ordered bids then asks, by price. Trades (price, qty, aggressor side, no order ids) come first, in event order.
+  The command's last message is flagged `last`.
+- **Alternatives:** deltas ("+30 at 100") are smaller but one lost or doubled message corrupts a level for good,
+  while an absolute value repairs itself on the next update. Updates by level index (CME MDP3) save the price, but
+  one insert near the top shifts every index below it. One message per event shows states that never existed (a
+  modified order resting at a crossing price before its trades).
+- **Why:** a consumer only ever sees books the engine actually had between commands, never a half-applied sweep,
+  and the feed is minimal: tests check it is exactly the depth diff before and after each command.
+
+### D42: Sequence numbers, gap detection, snapshot recovery
+- **What:** every incremental message has a sequence number, starting at 1, with no gaps. A snapshot is the full depth of both
+  sides plus the sequence number of the last message it includes. The consumer:
+  - live: `seq < next` is a duplicate, ignore it. `seq == next`: apply it. `seq > next`: a gap. It stops trusting its book,
+    buffers the message and asks for a snapshot.
+  - recovering: buffers everything newer than what it holds. On a snapshot it replaces its book, drops buffered
+    messages the snapshot already covers, and applies the rest. If they don't continue from the snapshot (more was lost), it asks again.
+  - a late joiner starts in recovering.
+- **Alternatives:** a reorder window (wait a little before calling it a gap) is common on UDP feeds. With one in-process
+  channel nothing reorders, so it would be untested code. Periodic snapshots on their own channel (CME's market
+  recovery feed) suit many consumers. On request suits a test, and the consumer logic is the same.
+- **Why:** this is the standard incremental-plus-snapshot pattern. The two cases a naive version gets wrong are messages older than the
+  snapshot and a gap inside the buffer.
+
+### D43: Binary wire format
+Fixed-width little-endian, like the journal and replay streams (D15, D17):
+
+```text
+level     seq u64 | tag 1 | flags u8 | price i64 | qty u64 | orders u32     30 bytes
+trade     seq u64 | tag 2 | flags u8 | price i64 | qty u64                   26 bytes
+snapshot  seq u64 | tag 3 | bids u32 | asks u32 | (price i64 | qty u64 | orders u32) per level, best first
+flags: bit 0 side (0 buy / 1 sell; the aggressor's for a trade), bit 1 last message of the command
+```
+- **Why:** a decoder knows every message's size from its tag. Decoding rejects unknown tags and flag bits. Tests
+  push every message through the bytes, and a golden digest of the generated flow's feed is pinned, so the feed
+  is as deterministic as the event stream (D4).
+- **Not done:** packet framing (MoldUDP64: session, first sequence number, count) and a real transport. Loss is simulated per message.
+
+### D44: Tests and measurement
+- **Oracle:** after every command of random sessions (both books), the publisher's messages must equal the diff of
+  `depth()` before and after, and the publisher's book must equal the engine's.
+- **Lossy channel:** a seeded channel drops, duplicates and delays messages. Snapshots are taken either when requested
+  or later, when delivered. At every batch boundary while live, the consumer's book must equal the engine's.
+- **CLI:** `lob feed <journal> [drop-percent] [seed]` prints message and byte counts, the digest, gaps and recoveries,
+  and times the publisher against applying the commands alone.
+- **Not in M8:** a feed from the ITCH day (one per symbol, from `ItchBook`). It's a follow-up if wanted.
