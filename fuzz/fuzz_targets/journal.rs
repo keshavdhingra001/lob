@@ -1,19 +1,17 @@
-//! Any bytes as a journal file (D65): never a panic, and whatever is read back,
-//! written out again, reads back the same with no torn tail.
+//! Any bytes as a command payload and as a journal file (D65): never a panic.
+//! Random bytes almost never carry a valid CRC32, so a whole-file target alone would
+//! never reach the payload decoder: the payload is fuzzed directly, and an accepted
+//! payload must be the canonical encoding of its command (as in D50).
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use lob::journal::{read_journal, JournalWriter};
+use lob::journal::{decode_command, encode_command, read_journal};
 
 fuzz_target!(|bytes: &[u8]| {
-    let Ok(journal) = read_journal(bytes) else {
-        return;
-    };
-    let mut out = JournalWriter::new(Vec::new()).unwrap();
-    for cmd in &journal.commands {
-        out.append(cmd).unwrap();
+    if let Ok(cmd) = decode_command(bytes) {
+        let mut buf = [0; 32];
+        let len = encode_command(&cmd, &mut buf);
+        assert_eq!(&buf[..len], bytes);
     }
-    let again = read_journal(&out.finish().unwrap()).unwrap();
-    assert_eq!(again.commands, journal.commands);
-    assert_eq!(again.torn_tail, None);
+    let _ = read_journal(bytes);
 });

@@ -1,0 +1,13 @@
+# Tokens of the text command format (D6), so the fuzzer can build whole commands.
+"limit"
+"market"
+"modify"
+"cancel"
+"buy"
+"sell"
+"gtc"
+"ioc"
+"fok"
+"post"
+" "
+"-"
