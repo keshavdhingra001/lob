@@ -12,6 +12,7 @@ pub mod gen;
 pub mod hash;
 pub mod itch;
 pub mod itch_book;
+pub mod itch_flow;
 pub mod journal;
 pub mod ladder;
 pub mod latency;

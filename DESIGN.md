@@ -1007,3 +1007,52 @@ targets hit live orders far more often. The filler left in the longer cases come
 Commands that become removable only after other simplifications stay in.
 
 **Not done:** coverage-guided fuzzing (`cargo-fuzz` needs nightly; D49), and a stateful model test of the consumer's buffer with reordering (the link never reorders, D42).
+
+### D53: One report, re-measured in one session (M11)
+- **What:** `scripts/report.sh` re-runs every throughput and latency measurement from M4–M9, plus a new ITCH-driven workload (D54),
+  in one session on one machine. `BENCHMARKS.md` collects the results.
+- **Alternatives:** copy the numbers already in this document into one place. They come from six different days and machine states
+  (the clock floor, other sessions' load), so putting them side by side would compare things that weren't measured alike.
+- **Why also ITCH:** every engine number so far comes from D18's generator. The roadmap promised the reference and fast books on real flow,
+  and M7 only replays NASDAQ's book (D37) without running our matching engine.
+
+### D54: ITCH order flow translated into engine commands
+- **What:** `lob itch <file> journal <symbol> <out>` turns one symbol's messages into a command journal that both books can replay:
+
+  | ITCH | Command |
+  |---|---|
+  | `A`/`F` add | `limit` GTC, price in cents (ITCH prices are $0.0001; sub-penny adds are skipped and counted) |
+  | `E` execute | `limit` IOC from the other side, at the named order's price, for the executed shares |
+  | `X` partial cancel | `modify` down to ITCH's new remaining size (never up, so priority is kept), or `cancel` at 0 |
+  | `D` delete | `cancel` |
+  | `U` replace | `cancel` the old order, then a new `limit` (NASDAQ gives the replacement new priority) |
+  | `C` execute at a cross price | like `X`: we have no auction, so cross executions only remove shares |
+  | everything else | nothing |
+
+  Our ids are a fresh increasing counter (D30), mapped from NASDAQ's order references.
+- **The engine runs inside the translator.** An `E` names the order NASDAQ filled, but our IOC fills whatever is first in *our* queue at that price.
+  Usually that's the same order, but not always (orders we skipped, auction leftovers). The translator applies each command to a reference book
+  and tracks every order's size in our book, so it can:
+  - skip a cancel or modify for an order our book no longer has, instead of emitting a command that is certain to be rejected
+    (executions are always sent: the trade happened, and the IOC keeps the level's volume in step);
+  - cancel an order NASDAQ has fully executed but that is still live in our book, so stale liquidity doesn't build up.
+  
+  The engine is deterministic (D4), so replaying the journal reproduces exactly what the translator saw.
+- **Counted:** IOC fills that hit the named order versus another one, IOC shares left unfilled, adds that traded on arrival, resyncs, skipped messages.
+  These counts measure how closely our price-time matching agrees with NASDAQ's on displayed orders.
+- **Alternatives:** translate only adds and cancels (no matching, so it measures maintaining the book, not matching it), or emit commands blindly
+  (simpler, but the books drift apart and the journal fills with rejects that aren't in the real flow).
+- **Symbols:** AAPL, and the symbol with the most add orders that day (`lob itch <file> top` lists them).
+
+### D55: Method is D27's
+Release build, `scripts/quiet.sh` before each part, a pinned core, warm-up, books alternated, median-p99 run of 5. Only runs whose clock floors are 13–15 ns count.
+The report covers throughput (commands/s), latency percentiles by command kind, the feed's cost (M8), end-to-end pipeline latency (ring vs `mpsc`, M9),
+the ITCH rebuild rate (M7) and criterion (M6). Every raw output starts with a machine block: CPU, kernel, governor, rustc, and the git commit.
+
+### D56: Raw output is committed, tables are written by hand
+`scripts/report.sh` writes each part's raw output to `bench/results/<date>/`, and those files are committed (small text).
+`BENCHMARKS.md` is written by hand, and each table names the raw file it comes from.
+- **Alternative:** have the script generate the markdown. That's more code to maintain and defend, and the written conclusions still need a person.
+
+### D57: No charts in M11
+Tables only. Percentile plots can be added in M12 if they're wanted.

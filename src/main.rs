@@ -11,6 +11,8 @@
 //! lob feed <journal> [drop-percent] [seed]   publish market data; recover over a lossy link (D40–D44)
 //! lob pipeline <journal> [rate] [ring|mpsc] [capacity]   three threads vs one (D45–D48)
 //! lob itch <file[.gz]> [frame|decode|book|dump] [symbol]   replay a NASDAQ ITCH 5.0 day (D36–D39)
+//! lob itch <file[.gz]> top              the symbols with the most add orders
+//! lob itch <file[.gz]> journal <symbol> <journal>   one symbol's flow as engine commands (D54)
 //! ```
 
 use std::fs::{self, File};
@@ -58,7 +60,10 @@ usage:
                                         only, frame + decode, or rebuild every book (default), and
                                         print messages/s; `book` also prints the symbol's depth at
                                         16:00 (default AAPL) and the D38 checks; `dump` prints the
-                                        symbol's messages";
+                                        symbol's messages
+  lob itch <file[.gz]> top              the 10 symbols with the most add orders
+  lob itch <file[.gz]> journal <symbol> <journal>   translate one symbol's flow into engine
+                                        commands (D54) and write them to a journal";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -82,6 +87,8 @@ fn main() -> ExitCode {
         ["pipeline", path, rate] => pipeline(path, rate, "ring", "1024"),
         ["pipeline", path, rate, channel] => pipeline(path, rate, channel, "1024"),
         ["pipeline", path, rate, channel, cap] => pipeline(path, rate, channel, cap),
+        ["itch", path, "top"] => itch_top(path),
+        ["itch", path, "journal", symbol, out] => itch_journal(path, symbol, out),
         ["itch", path] => itch_replay(path, "book", "AAPL"),
         ["itch", path, mode] => itch_replay(path, mode, "AAPL"),
         ["itch", path, mode, symbol] => itch_replay(path, mode, symbol),
@@ -589,6 +596,75 @@ fn itch_replay(path: &str, mode: &str, symbol: &str) -> Result<(), String> {
             }
         }
     }
+    Ok(())
+}
+
+/// The 10 symbols with the most add orders (`A` and `F`), to pick D54's workloads.
+fn itch_top(path: &str) -> Result<(), String> {
+    use lob::itch::{self, Body};
+
+    let mut reader = itch::open(path.as_ref()).map_err(|e| format!("{path}: {e}"))?;
+    let (mut adds, mut names) = (vec![0u64; 1 << 16], vec![None; 1 << 16]);
+    while let Some(m) = reader.next_message().map_err(|e| format!("{path}: {e}"))? {
+        match m.body {
+            Body::StockDirectory { stock } => names[m.header.locate as usize] = Some(stock),
+            Body::AddOrder { .. } => adds[m.header.locate as usize] += 1,
+            _ => {}
+        }
+    }
+    let mut top: Vec<(u64, usize)> = adds.iter().enumerate().map(|(l, &n)| (n, l)).collect();
+    top.sort_by(|a, b| b.cmp(a));
+    for &(n, l) in top.iter().take(10).filter(|(n, _)| *n > 0) {
+        let name = names[l].map_or("?".to_string(), |s| s.to_string());
+        println!("{name:<8} {n:>10} adds  (locate {l})");
+    }
+    Ok(())
+}
+
+/// Translate one symbol's flow into engine commands (D54) and write them to a journal.
+fn itch_journal(path: &str, symbol: &str, out: &str) -> Result<(), String> {
+    use lob::itch::{self, Stock};
+    use lob::itch_flow::Translator;
+
+    if symbol.is_empty() || symbol.len() > 8 {
+        return Err(format!("bad symbol `{symbol}`"));
+    }
+    let mut reader = itch::open(path.as_ref()).map_err(|e| format!("{path}: {e}"))?;
+    let mut translator = Translator::new(Stock::new(symbol));
+    let mut commands = Vec::new();
+    while let Some(m) = reader.next_message().map_err(|e| format!("{path}: {e}"))? {
+        translator.on_message(&m, &mut commands);
+    }
+    write_journal(out, commands.iter().copied())?;
+    let s = translator.stats();
+    if s.messages == 0 {
+        return Err(format!("no messages for `{symbol}`"));
+    }
+    let resting: usize = [lob::Side::Buy, lob::Side::Sell]
+        .iter()
+        .flat_map(|&side| translator.book().depth(side, usize::MAX))
+        .map(|l| l.orders)
+        .sum();
+    println!(
+        "{symbol}: {} messages -> {} commands in {out}",
+        s.messages, s.commands
+    );
+    println!(
+        "adds {} (sub-penny, skipped: {}; traded on arrival: {}), executions {}, cross executions {}",
+        s.adds, s.sub_penny, s.adds_traded, s.executions, s.cross_executions
+    );
+    let shares = (s.named_shares + s.other_shares + s.unfilled_shares).max(1) as f64;
+    println!(
+        "IOC shares: {} filled the named order ({:.2}%), {} another order, {} unfilled",
+        s.named_shares,
+        s.named_shares as f64 / shares * 100.0,
+        s.other_shares,
+        s.unfilled_shares
+    );
+    println!(
+        "resync cancels {}, skipped (gone from our book) {}, untracked {}, rejects {}; {resting} orders resting at the end",
+        s.resyncs, s.gone, s.untracked, s.rejects
+    );
     Ok(())
 }
 
