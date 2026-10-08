@@ -8,6 +8,7 @@ edition = "2021"
 cargo-fuzz = true
 
 [dependencies]
+crc32fast = "1"
 libfuzzer-sys = "0.4"
 lob = { path = ".." }
 
@@ -39,6 +40,13 @@ bench = false
 [[bin]]
 name = "text"
 path = "fuzz_targets/text.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "book_snapshot"
+path = "fuzz_targets/book_snapshot.rs"
 test = false
 doc = false
 bench = false

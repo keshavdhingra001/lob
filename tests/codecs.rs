@@ -8,7 +8,11 @@ use lob::itch::{self, Body, Header, Message, Stock};
 use lob::journal::{decode_command, encode_command, read_journal, JournalWriter};
 use std::num::NonZeroU16;
 
-use lob::{Command, OrderId, Price, Qty, Side, Stp, StpAction, TimeInForce};
+use lob::snapshot::Snapshot as BookSnapshot;
+use lob::{
+    BookConfig, Command, FastBook, OrderBook, OrderId, Price, Qty, RefBook, Side, Stp, StpAction,
+    TimeInForce,
+};
 use proptest::prelude::*;
 
 fn side() -> impl Strategy<Value = Side> {
@@ -259,6 +263,67 @@ impl std::io::Read for Chunked<'_> {
     }
 }
 
+/// A book snapshot after a random session, with a few edits whose checksum is then made
+/// to match again, so the edits reach the decoder's checks behind the CRC.
+fn book_snapshot_bytes() -> impl Strategy<Value = Vec<u8>> {
+    // Quantities and prices pulled into a narrow range, so orders rest, cross and share levels.
+    let tame = |cmd: Command| match cmd {
+        Command::Limit {
+            id,
+            side,
+            qty,
+            price,
+            tif,
+            stp,
+        } => Command::Limit {
+            id,
+            side,
+            qty: Qty(qty.0 % 20),
+            price: Price(price.0.rem_euclid(30)),
+            tif,
+            stp,
+        },
+        Command::Market { id, side, qty, stp } => Command::Market {
+            id,
+            side,
+            qty: Qty(qty.0 % 20),
+            stp,
+        },
+        Command::Modify { id, qty, price } => Command::Modify {
+            id,
+            qty: Qty(qty.0 % 20),
+            price: Price(price.0.rem_euclid(30)),
+        },
+        cancel => cancel,
+    };
+    let encoded = prop::collection::vec(command().prop_map(tame), 0..40).prop_map(|cmds| {
+        let mut book = FastBook::with_config(BookConfig {
+            tick_size: 1,
+            max_qty: 15,
+        });
+        let mut out = Vec::new();
+        for cmd in &cmds {
+            book.apply(cmd, &mut out);
+        }
+        let stats = lob::replay::ReplayStats {
+            commands: cmds.len() as u64,
+            ..Default::default()
+        };
+        BookSnapshot {
+            state: book.state(),
+            stats,
+            journal_offset: 8,
+        }
+        .encode()
+    });
+    (encoded, edits()).prop_map(|(bytes, edits)| {
+        let mut body = apply(bytes[..bytes.len().saturating_sub(4)].to_vec(), &edits);
+        let crc = crc32fast::hash(&body);
+        body.extend_from_slice(&crc.to_le_bytes());
+        body
+    })
+}
+
 proptest! {
     #[test]
     fn commands_round_trip_through_text(cmd in command()) {
@@ -405,6 +470,21 @@ proptest! {
             let mut buf = Vec::new();
             feed::encode_snapshot(&snap, &mut buf);
             prop_assert_eq!(buf, bytes);
+        }
+    }
+
+    /// An accepted book snapshot is canonical and restores into either book, which then
+    /// passes its invariants and writes the same state back (D74, D81).
+    #[test]
+    fn accepted_book_snapshots_are_canonical_and_restore(bytes in book_snapshot_bytes()) {
+        if let Ok(snap) = BookSnapshot::decode(&bytes) {
+            prop_assert_eq!(snap.encode(), bytes);
+            let fast = FastBook::from_state(&snap.state).unwrap();
+            let reference = RefBook::from_state(&snap.state).unwrap();
+            prop_assert_eq!(fast.check_invariants(), Ok(()));
+            prop_assert_eq!(reference.check_invariants(), Ok(()));
+            prop_assert_eq!(&fast.state(), &snap.state);
+            prop_assert_eq!(&reference.state(), &snap.state);
         }
     }
 

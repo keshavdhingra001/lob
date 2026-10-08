@@ -67,12 +67,17 @@ impl BookState {
             return Err("bad book config");
         }
         let mut ids = HashSet::with_capacity(self.orders.len());
+        // Books keep per-level totals in a u64; the whole book fitting covers every level.
+        let mut total = 0u64;
         let mut prev: Option<&RestingOrder> = None;
         let mut best_bid = None;
         for o in &self.orders {
             if o.qty.0 == 0 || o.qty.0 > config.max_qty {
                 return Err("resting quantity out of range");
             }
+            total = total
+                .checked_add(o.qty.0)
+                .ok_or("resting quantity overflows")?;
             if o.price.0 % config.tick_size != 0 {
                 return Err("resting price off the tick grid");
             }
@@ -452,6 +457,24 @@ mod tests {
             ..order(1, Buy, 2)
         };
         assert_eq!(check(9, vec![big]), Err("resting quantity out of range"));
+        let huge = BookState {
+            config: BookConfig {
+                tick_size: 1,
+                max_qty: u64::MAX,
+            },
+            last_id: Some(OrderId(9)),
+            orders: vec![
+                RestingOrder {
+                    qty: Qty(u64::MAX),
+                    ..order(1, Buy, 2)
+                },
+                RestingOrder {
+                    qty: Qty(1),
+                    ..order(2, Buy, 2)
+                },
+            ],
+        };
+        assert_eq!(huge.validate(), Err("resting quantity overflows"));
         assert!(RefBook::from_state(&BookState {
             config,
             last_id: None,
