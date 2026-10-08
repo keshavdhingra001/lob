@@ -273,6 +273,7 @@ mod tests {
                 id,
                 remaining: Qty(1),
             },
+            Event::Replenished { id, qty: Qty(1) },
         ]
         .iter()
         .map(|e| {
@@ -283,9 +284,36 @@ mod tests {
         .collect();
         assert_eq!(
             sizes,
-            [(17, 1), (18, 2), (33, 3), (42, 4), (25, 5), (25, 6)],
+            [
+                (17, 1),
+                (18, 2),
+                (33, 3),
+                (42, 4),
+                (25, 5),
+                (25, 6),
+                (25, 7)
+            ],
             "(size, tag) per event kind: a shared tag would let the digest confuse two kinds"
         );
+    }
+
+    #[test]
+    fn reject_reasons_have_distinct_bytes() {
+        // No pinned flow produces every reason (none produces bad-peak), so a reused byte
+        // would pass the golden digests.
+        use RejectReason::*;
+        let bytes: Vec<u8> = [
+            ZeroQty,
+            QtyTooLarge,
+            BadTick,
+            IdNotIncreasing,
+            UnknownOrder,
+            WouldCross,
+            BadPeak,
+        ]
+        .map(reason_byte)
+        .to_vec();
+        assert_eq!(bytes, [1, 2, 3, 4, 5, 6, 7]);
     }
 
     #[test]

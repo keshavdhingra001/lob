@@ -707,6 +707,39 @@ mod tests {
         assert!(
             run("market 2 sell 9", &[accepted, trade(99)]).ends_with("market order 2 left open")
         );
+
+        // An iceberg resting 10 behind a peak of 4: after its slice trades, the next one
+        // must be exactly min(peak, hidden) = 4, and must come in the same command.
+        let mut p = Publisher::new();
+        let iceberg: Command = "limit 1 buy 10 99 peak=4".parse().unwrap();
+        let accepted1 = Event::Accepted { id: OrderId(1) };
+        p.on_command(&iceberg, &[accepted1], &mut Vec::new())
+            .unwrap();
+        let sell: Command = "market 2 sell 4".parse().unwrap();
+        let taken = [
+            accepted,
+            Event::Trade {
+                taker: OrderId(2),
+                maker: OrderId(1),
+                taker_side: Side::Sell,
+                qty: Qty(4),
+                price: Price(99),
+            },
+        ];
+        let replenished = |qty| Event::Replenished {
+            id: OrderId(1),
+            qty: Qty(qty),
+        };
+        for (slice, ok) in [(3, false), (5, false), (4, true)] {
+            let mut p2 = Publisher::new();
+            p2.on_command(&iceberg, &[accepted1], &mut Vec::new())
+                .unwrap();
+            let events = [taken[0], taken[1], replenished(slice)];
+            let result = p2.on_command(&sell, &events, &mut Vec::new());
+            assert_eq!(result.is_ok(), ok, "slice {slice}: {result:?}");
+        }
+        let err = p.on_command(&sell, &taken, &mut Vec::new()).unwrap_err();
+        assert!(err.ends_with("buy 99 shows nothing"), "{err}");
     }
 
     #[test]

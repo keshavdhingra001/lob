@@ -584,6 +584,22 @@ mod tests {
     }
 
     #[test]
+    fn invariant_checker_catches_a_bad_iceberg() {
+        for (qty, peak, hidden) in [(5, Some(2), 0), (1, None, 3)] {
+            let mut book = RefBook::new();
+            let order = Resting {
+                hidden: Qty(hidden),
+                peak: peak.map(Qty),
+                ..Resting::new(OrderId(1), Qty(qty), None, false, None)
+            };
+            book.rest(Side::Buy, Price(100), order);
+            book.last_id = Some(OrderId(1));
+            let err = book.check_invariants().unwrap_err();
+            assert!(err.contains("shows more than its peak"), "{err}");
+        }
+    }
+
+    #[test]
     fn invariant_checker_catches_a_stale_index() {
         let mut book = RefBook::new();
         run(&mut book, &["limit 1 buy 5 100"]);
