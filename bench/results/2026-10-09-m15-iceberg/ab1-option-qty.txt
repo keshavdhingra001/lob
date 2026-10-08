@@ -1,0 +1,91 @@
+# M15 build: first version, peak: Option<Qty> (Command 48 bytes), 021978a
+# NOT a quiet machine: other sessions kept the load average at 7-10 on 8 cores; only the alternated old/new comparison is meaningful
+# M15 A/B: lob bench on gen2m (default flow, no icebergs), M14 (dbaa7e9) vs M15, alternated, taskset -c 5
+2026-10-09T03:31:33+05:30
+ 03:31:33 up 2 days,  8:07,  1 user,  load average: 8.94, 8.79, 8.98
+8
+Model name:                              11th Gen Intel(R) Core(TM) i7-1165G7 @ 2.80GHz
+## round 1 m14  (load: 8.94 8.79 8.98)
+2000000 commands, best of 5; 1658 orders resting at the end
+                 apply only               full replay (+ encode + hash)
+reference     157.4 ms  12.71 M/s        295.4 ms   6.77 M/s   digest b3df3bac1e73d7f6
+fast           98.4 ms  20.32 M/s        229.6 ms   8.71 M/s   digest b3df3bac1e73d7f6
+speedup        1.60x                     1.29x
+## round 1 m15  (load: 8.94 8.79 8.98)
+2000000 commands, best of 5; 1658 orders resting at the end
+                 apply only               full replay (+ encode + hash)
+reference     168.5 ms  11.87 M/s        306.1 ms   6.53 M/s   digest b3df3bac1e73d7f6
+fast          108.1 ms  18.50 M/s        236.5 ms   8.46 M/s   digest b3df3bac1e73d7f6
+speedup        1.56x                     1.29x
+## round 2 m14  (load: 8.70 8.74 8.96)
+2000000 commands, best of 5; 1658 orders resting at the end
+                 apply only               full replay (+ encode + hash)
+reference     161.8 ms  12.36 M/s        304.9 ms   6.56 M/s   digest b3df3bac1e73d7f6
+fast           97.1 ms  20.60 M/s        229.5 ms   8.71 M/s   digest b3df3bac1e73d7f6
+speedup        1.67x                     1.33x
+## round 2 m15  (load: 8.72 8.75 8.96)
+2000000 commands, best of 5; 1658 orders resting at the end
+                 apply only               full replay (+ encode + hash)
+reference     173.0 ms  11.56 M/s        308.3 ms   6.49 M/s   digest b3df3bac1e73d7f6
+fast          103.3 ms  19.35 M/s        231.4 ms   8.64 M/s   digest b3df3bac1e73d7f6
+speedup        1.67x                     1.33x
+## round 3 m14  (load: 8.67 8.73 8.96)
+2000000 commands, best of 5; 1658 orders resting at the end
+                 apply only               full replay (+ encode + hash)
+reference     166.0 ms  12.05 M/s        287.9 ms   6.95 M/s   digest b3df3bac1e73d7f6
+fast          101.6 ms  19.69 M/s        230.9 ms   8.66 M/s   digest b3df3bac1e73d7f6
+speedup        1.63x                     1.25x
+## round 3 m15  (load: 8.53 8.71 8.95)
+2000000 commands, best of 5; 1658 orders resting at the end
+                 apply only               full replay (+ encode + hash)
+reference     170.5 ms  11.73 M/s        298.6 ms   6.70 M/s   digest b3df3bac1e73d7f6
+fast          101.7 ms  19.66 M/s        228.3 ms   8.76 M/s   digest b3df3bac1e73d7f6
+speedup        1.68x                     1.31x
+## round 4 m14  (load: 8.33 8.66 8.93)
+2000000 commands, best of 5; 1658 orders resting at the end
+                 apply only               full replay (+ encode + hash)
+reference     162.5 ms  12.31 M/s        294.0 ms   6.80 M/s   digest b3df3bac1e73d7f6
+fast           97.2 ms  20.57 M/s        223.6 ms   8.94 M/s   digest b3df3bac1e73d7f6
+speedup        1.67x                     1.31x
+## round 4 m15  (load: 8.22 8.63 8.92)
+2000000 commands, best of 5; 1658 orders resting at the end
+                 apply only               full replay (+ encode + hash)
+reference     174.5 ms  11.46 M/s        297.8 ms   6.72 M/s   digest b3df3bac1e73d7f6
+fast          103.2 ms  19.37 M/s        236.1 ms   8.47 M/s   digest b3df3bac1e73d7f6
+speedup        1.69x                     1.26x
+## round 5 m14  (load: 8.37 8.66 8.93)
+2000000 commands, best of 5; 1658 orders resting at the end
+                 apply only               full replay (+ encode + hash)
+reference     166.9 ms  11.99 M/s        298.5 ms   6.70 M/s   digest b3df3bac1e73d7f6
+fast          146.2 ms  13.68 M/s        303.9 ms   6.58 M/s   digest b3df3bac1e73d7f6
+speedup        1.14x                     0.98x
+## round 5 m15  (load: 9.46 8.88 9.00)
+2000000 commands, best of 5; 1658 orders resting at the end
+                 apply only               full replay (+ encode + hash)
+reference     258.6 ms   7.73 M/s        421.9 ms   4.74 M/s   digest b3df3bac1e73d7f6
+fast          155.4 ms  12.87 M/s        319.8 ms   6.25 M/s   digest b3df3bac1e73d7f6
+speedup        1.66x                     1.32x
+## round 6 m14  (load: 9.82 8.96 9.02)
+2000000 commands, best of 5; 1658 orders resting at the end
+                 apply only               full replay (+ encode + hash)
+reference     261.6 ms   7.65 M/s        419.2 ms   4.77 M/s   digest b3df3bac1e73d7f6
+fast          164.2 ms  12.18 M/s        318.0 ms   6.29 M/s   digest b3df3bac1e73d7f6
+speedup        1.59x                     1.32x
+## round 6 m15  (load: 10.54 9.15 9.08)
+2000000 commands, best of 5; 1658 orders resting at the end
+                 apply only               full replay (+ encode + hash)
+reference     266.8 ms   7.50 M/s        431.3 ms   4.64 M/s   digest b3df3bac1e73d7f6
+fast          170.8 ms  11.71 M/s        406.8 ms   4.92 M/s   digest b3df3bac1e73d7f6
+speedup        1.56x                     1.06x
+wrote 2000000 commands (51581111 bytes) to target/tmp/m15/ice2m.jrnl
+## M15 on an iceberg flow (iceberg-pct 33), for reference: a different workload
+2000000 commands, best of 5; 1769 orders resting at the end
+                 apply only               full replay (+ encode + hash)
+reference     340.9 ms   5.87 M/s        621.5 ms   3.22 M/s   digest 57e3814237dec7cb
+fast          174.7 ms  11.44 M/s        371.8 ms   5.38 M/s   digest 57e3814237dec7cb
+speedup        1.95x                     1.67x
+2000000 commands, best of 5; 1769 orders resting at the end
+                 apply only               full replay (+ encode + hash)
+reference     272.0 ms   7.35 M/s        487.5 ms   4.10 M/s   digest 57e3814237dec7cb
+fast          109.8 ms  18.22 M/s        262.6 ms   7.62 M/s   digest 57e3814237dec7cb
+speedup        2.48x                     1.86x

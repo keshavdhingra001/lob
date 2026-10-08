@@ -1,0 +1,11 @@
+# Retired instructions (perf stat -e instructions:u, taskset -c 5), lob run <mode> gen2m.jrnl 3
+# book work = mode - none (none = loading the journal only). Insensitive to other sessions' load.
+2026-10-09T03:51:50+05:30
+m14 none 548328650
+m14 fast 2199889720
+m14 ref 2961807413
+m15 none 575140077
+m15 fast 2274281295
+m15 ref 3131014611
+# history of M15 builds, fast book work (fast - none), millions: M14 1651.6; first M15 (Option<Qty> peak) 1749.4; NonZeroU64 peak + rest/hide split 1716.8; unlink returns Node 1700.2; final 1699.1
+# M14 with Command padded to 40 bytes (a dummy Option<NonZeroU64>): fast 2223.89M - none 572.33M = 1651.6M, the same as M14: Command size costs nothing

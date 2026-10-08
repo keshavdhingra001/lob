@@ -18,7 +18,7 @@ so later ones sometimes replace earlier ones, and each replaced entry says what 
   obviously correct. The **fast book** (D19–D21, D30–D34) uses a slab of orders, an intrusive list per level, a tick-indexed price ladder
   with a bitmap, and O(1) cancel.
 - **Matching:** price-time priority, trades at the maker's price (D9), modify with exchange priority rules (D11), IOC / FOK / post-only (D12),
-  tick and max-quantity checks (D14), self-trade prevention by STP group (D67–D73).
+  tick and max-quantity checks (D14), self-trade prevention by STP group (D67–D73), iceberg orders (D83–D89).
 - **Input and output:** a checksummed binary command journal (D15, D16); a sequence-numbered event stream with a 64-bit digest (D17);
   an L2 feed with gap recovery (D40–D44); a three-thread pipeline whose output equals one thread's byte for byte (D45–D47).
 - **Crash recovery:** a live engine with group commit (D78) and atomic snapshots of the logical book (D74–D77). Recovery replays the journal
@@ -36,6 +36,7 @@ so later ones sometimes replace earlier ones, and each replaced entry says what 
 | Core model: prices, ids, determinism, output buffer, text format | D2–D6 |
 | Matching rules and order types | D9, D11, D12, D14, D30 |
 | Self-trade prevention | D67–D73, M13 results |
+| Iceberg orders | D83–D89, M15 results |
 | Reference book | D8 |
 | Fast book | D19–D21, D31, D33, D34 |
 | No allocation on the hot path | D5, D32 |
@@ -65,7 +66,8 @@ What a production exchange has that this engine doesn't, and where each would go
   would replace the journal decoder in the gateway thread (D46). Every latency here is in-process: no network, no kernel bypass.
 - **More than one symbol.** One book per symbol, symbols sharded across matching threads, a ring per shard (D7). Built for one symbol only.
 - **Auctions** (the opening and closing cross). ITCH cross executions only remove shares (D54).
-- **Hidden, iceberg, pegged and stop orders.** The FOK pre-scan (D12) is correct only because all quantity is visible.
+- **Fully hidden, pegged and stop orders.** Icebergs are built (D83–D89); an order showing nothing at all, or one whose price follows the touch,
+  is not. A hidden-quantity second pass (Eurex's pro-rata split of the rest, D85) isn't either.
 - **Decrement-and-cancel self-trade prevention** (CME's fourth mode; D68). The three other modes are built (D67–D73).
 - **Pre-trade risk** beyond the fat-finger quantity limit: position and notional limits (D14).
 - **Replicas.** Crash recovery is built (D74–D81), but there's one copy: no standby replaying the journal over the network, and no failover.
@@ -215,6 +217,7 @@ What a production exchange has that this engine doesn't, and where each would go
   The flag is remembered on the resting order, so a later modify can't turn it into a taker.
   - **Alternative:** "slide": reprice it one tick behind the touch. That's common on crypto venues, but it means the engine picks prices for the client.
 - **Self-trade prevention:** not built (see Not built). It needs an owner/account field on every order, which is a format change best done together with a binary gateway protocol.
+  (Built in M13 as D67–D73. Icebergs change the FOK pre-scan: D86.)
 
 ### D13: Conservation ledger (M2)
 - **What:** `Ledger` rebuilds every live order's open quantity from the commands and events
@@ -1404,3 +1407,115 @@ Each target ran 10 minutes on 2026-10-08 (all with the text dictionary, which on
   hashing the whole journal prefix into the snapshot (proves the most, but checking it costs a full read, which is what the snapshot saves).
   A 32-bit CRC at a known offset can collide by chance (about 1 in 4 billion for unrelated journals), which is far below the operator mistakes it guards against.
 - **Tests:** the reproduction (both directions, and the ambiguous case), a stale snapshot through the engine, an input that doesn't match, and decode checks for the new field.
+
+### D83: Icebergs are GTC limit orders with a peak (M15)
+- **What:** a limit order may carry `peak=<n>`: only `n` of it shows at a time; the rest is hidden. Text `limit 9 buy 100 50 peak=10`, after the
+  time in force and before the STP pair, so every command has one spelling. The book rejects `bad-peak` unless `peak < qty` and the order
+  can rest (GTC or post-only): an IOC, FOK or market order never rests, so a peak would mean nothing. The check runs after the tick and quantity
+  checks and before the id check, so a rejected iceberg doesn't use up its id. A peak is `Option<NonZeroU64>`: like an STP group (D67),
+  peak 0 doesn't exist, so `peak=0` is a parse error and an invalid journal record, and "no peak" costs no space (D87 says why that mattered).
+  A peak at or above the quantity parses and the book rejects it, because whether it fits depends on the order.
+- **Alternatives:** a separate `iceberg` command (a second way to enter a limit order); a "display quantity" that may equal the order's quantity
+  (then `peak = qty` and no peak would be two spellings of the same order).
+- **An incoming iceberg trades its whole size.** The peak is about what the book shows, not what the order may take. What's left rests showing
+  `min(peak, rest)`. NASDAQ reserve orders and CME icebergs work this way.
+
+### D84: A replenished slice goes to the back of its level
+- **What:** when an iceberg's shown slice trades away and it has hidden quantity left, the next slice, `min(peak, hidden)`, shows at the back of
+  the same price level. Orders that arrived after the iceberg but before the refill trade first.
+- **Why:** NASDAQ, CME and the LSE all do this. Hidden quantity has no time priority: otherwise an iceberg would get a large order's priority
+  while showing a small one, which is exactly what displayed liquidity is supposed to be rewarded for.
+- **Alternative:** keep the original priority (some venues did, historically). It's simpler (no move) and unfair to the orders behind.
+
+### D85: Matching takes shown quantity only, and refills within one sweep
+- **What:** a taker matches only shown slices. When a slice is used up, the iceberg replenishes at once, goes to the back, and the same taker keeps
+  going down the queue, so it can meet the same iceberg again and take several slices in one command. The events say so:
+  `trade`, `replenished`, `trade`, ...
+- **Alternative (not built):** after the shown quantity at a price is gone, a second pass that splits the taker among hidden quantities
+  (Eurex distributes the rest pro rata). Here hidden quantity is only ever reached slice by slice, in time order.
+- **A consequence:** a sweep through one big iceberg alone at a level costs one trade and one move per slice, so a small peak makes a big
+  order slow to take. The FOK pre-check doesn't walk slices (D86); only matching does.
+
+### D86: FOK counts hidden quantity, and STP covers the whole iceberg
+- **FOK** (D12): matching reaches every hidden unit at a level slice by slice (D85), so the pre-check counts shown plus hidden. The fast book keeps a
+  hidden total per level, in a `Vec` beside the level slab (the level node is full at 32 bytes, D34), so an ungrouped FOK stays O(levels).
+- **With STP `cn` or `cb`** (D71) the rule needed more care than the plan said. Matching stops at the first same-group order; every slice replenished
+  before that goes behind it. So at that level only the **shown** quantity of the orders ahead of the blocker counts, not their hidden quantity.
+  Counting it (the naive "visible plus hidden") would let a FOK order trade some slices and then get STP-cancelled: a partial fill.
+  The scenario file `15_iceberg_stp_fok.txt` has the case, and the ledger now checks FOK from the outside: an accepted FOK trades all or nothing.
+- **STP** cancels the whole iceberg, hidden quantity included (`stp-cancelled <id> <shown + hidden>`). A cancel and an STP cancel both report the total.
+- **D12's note** ("correct only because all quantity is visible") is replaced by this entry.
+
+### D87: The fast book's order node stays 32 bytes
+- **What:** `Node.post_only: bool` becomes `flags: u8` (post-only, iceberg). An iceberg's peak and hidden quantity live in a side map keyed by id
+  (`icebergs`, fmix64 like the index, D31), touched only when an iceberg rests, replenishes, is modified or leaves. The node holds the shown slice in
+  `qty`, so matching, depth and the level totals don't change.
+- **Alternatives:** peak and hidden on the node (two `u64`s: 48 bytes, so 1.3 orders per cache line instead of 2); a side map keyed by slot
+  (a `Vec` as big as the slab, mostly empty, for a feature most orders don't use).
+- **Cost on non-iceberg flow:** one flag test when a resting order fills completely, and the peak check on entry. Measured in the M15 results.
+- **`peak` is `Option<NonZeroU64>`** (8 bytes; 0 is `None`), not `Option<Qty>` (16), so `Command` grows from 32 to 40 bytes, not 48. That was
+  the first suspect for the slowdown below, and it was wrong: M14 with its `Command` padded to 40 bytes retires exactly the same book
+  instructions as M14 (M15 results). The smaller type stays anyway: it's free, and it keeps
+  peak 0 out of the model, as `NonZeroU16` does for STP groups.
+
+### D88: What shows, what's stored, and modify
+- **Market data and depth show slices only** (`depth()`, the feed, `book` in scenarios). A replenish changes a level's quantity but not its order count.
+- **Event:** `Replenished { id, qty }`, text `replenished <id> <qty>`, event tag 7: the size of the new slice. The feed and the ledger, which never
+  look inside a book, need it to know what shows.
+- **Snapshot** version 3 adds `peak u64 | hidden u64` per order (peak 0 means not an iceberg; `validate` refuses hidden quantity without a peak, a
+  slice above its peak, a peak not below `max_qty`, and shown plus hidden above `max_qty`). Version 2 files are refused, so recovery replays from zero (as for v1).
+- **Ledger** (D13): it keeps each order's shown part apart from its total. A trade may take only shown quantity; a replenish must come when nothing
+  shows and be exactly `min(peak, hidden)`; after each command every resting order shows something and no more than its peak; depth equals the
+  shown parts; cancels report totals.
+- **Modify** sets the total open quantity (shown plus hidden). Same price and not more: in place, priority kept (D11), **the cut comes out of hidden
+  quantity first**, then shown. Anything else re-enters at the back, trades with its whole size, and rests showing `min(peak, rest)`. The peak never
+  changes; a modify below the peak just shows everything.
+  - **Alternative:** cut shown first. That would shrink what the market sees while the order keeps its place, the reverse of what a trader
+    reducing a hidden order wants.
+
+### D89: Journal tag 7, and how icebergs are tested
+- **Journal** version 3: tag 7 is a limit with a peak, `limit's fields | peak u64 | group u16 | action u8` (38 bytes), with group 0 and action 0 for
+  no STP (any other action with group 0 is invalid, and so is peak 0, so the encoding stays canonical). Orders without a peak keep tags 1 and 5 byte for byte, so v1 and
+  v2 journals read unchanged. The longest payload grows from 30 to 38 bytes (`MAX_PAYLOAD`), and the pipeline's frames with it.
+- **Tests:** two scenario files written by hand from D83–D88 before either book ran them (both books passed them on the first run); icebergs in
+  every random flow (the generator's `iceberg_pct`, default 0 so the golden digest is unchanged; the edge-case flow with every bad-peak case;
+  proptest sessions; the crash matrix; the feed's depth oracle); the differential test also compares whole book states, since depth can't see
+  hidden quantity; a second pinned digest for an iceberg flow; a new fuzz target `books` that runs any bytes as a session on both books with the
+  ledger watching.
+
+### M15 results (2026-10-09)
+- **Correctness:** both books passed the two hand-written iceberg scenario files on their first run. Differential testing with icebergs (the
+  generator at 33% icebergs with and without STP groups, 40k × 3 seeds × 2; edge-case flow with every bad-peak case, 10k × 20 seeds × 2;
+  wide prices × 5), event for event, with whole book states compared and the ledger's shown/hidden checks on. Icebergs also run through the
+  proptest sessions, the crash matrix (snapshot v3 at every cut) and the feed's depth oracle. Both pinned digests are unchanged; a third
+  one now pins an iceberg flow (`4249c081da9a582d`).
+- **A rule fixed in design:** "FOK counts visible + hidden" (the plan) is wrong when an STP blocker sits behind icebergs: D86 has the case and the
+  rule both books implement. The ledger now checks FOK all-or-nothing independently, so a pre-check that gets it wrong fails a test.
+- **Fuzzing,** no crash: `books` (new, differential with the ledger) 458k sessions in 10 minutes, 1,663 edges; `book_snapshot` 20.5M inputs,
+  `journal` 35.9M, `text` 23.6M, 5 minutes each.
+- **Mutation-checked:** 72 planted bugs across both books, `check_peak`, the journal and snapshot codecs, the ledger, the feed, the text format and the
+  event encoding. First pass: 67 caught. Three survivors were real gaps, now closed with tests: the reject reason bytes weren't checked for being
+  distinct (`bad-peak` could reuse `would-cross`'s byte; no pinned flow produces `bad-peak`), the feed's slice-size check had no forged-event test,
+  and the reference book's own peak invariant had no bad-state test. Two are equivalent: masking the iceberg flag off a re-entering modify (`hide`
+  sets it again) and resetting a reused level's hidden total (it's always 0 by then). After the fixes, **70 of 72**. The fast book was then
+  reworked for speed (below), and its 17 mutations were run again: **17 of 17**.
+- **Cost on flow without icebergs** ([raw output](bench/results/2026-10-09-m15-iceberg/)): `lob bench` on gen2m, M14 and M15 binaries alternated
+  8 times on one pinned core. Not a quiet machine (load average 7–10 on 8 cores), so only the paired comparison counts, plus retired
+  instructions, which don't depend on load:
+
+  | build | fast book, apply only | book instructions per command |
+  |---|---|---|
+  | M14 | 21.4–21.6 M/s | 275 |
+  | M15, first version | about 5% slower | 292 (+5.9%) |
+  | M15, final | 20.6–20.9 M/s, **3.5% slower** (paired median; 2.9–4.3%) | 283 (+2.9%) |
+
+  Full replay (decode, apply, encode, hash): 9.23–9.28 M/s before, 9.01–9.11 after, **about 2% slower**. **The < 2% target for apply was missed.**
+  The reference book is about 4% slower too; that wasn't investigated, since it's the oracle and clarity comes first there (D8).
+- **Where the cost was, found by counting instructions** (exact and load-free, unlike timings here): the first suspect, `Command` growing from 32
+  to 48 bytes, was wrong: M14 padded to the same size retires the same book instructions. What cost was the fast book passing an
+  `Option<Reserve>` through every `rest` and returning one from every `unlink` (56 bytes through memory on every fill and cancel), and a hash
+  probe of the iceberg map on every in-place modify. Moving the reserve out (`hide`, and callers that need it read it first) and gating every
+  map access on the node's flag took the book from +5.9% to +2.9% instructions. What's left is about one flag test or branch per operation
+  (the peak check at entry, the flag test when a maker fills, the flag test on unlink), and it's spread too thin to remove without
+  giving up D87's design.
+- **With icebergs** (a third of big passive orders, a different workload, so not comparable to the table): fast book 19.1–19.2 M/s apply only.

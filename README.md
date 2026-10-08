@@ -16,8 +16,9 @@ a simple one and a fast one, must produce the same events for every command, and
 - **A whole NASDAQ day** (282M messages, every symbol's book rebuilt): 0 errors, 0 orders left at the end of the day, every execution message at the best price.
 
 Sources: [BENCHMARKS.md](BENCHMARKS.md) (method, machine, every table tied to raw output in [`bench/results/`](bench/results/)),
-and [DESIGN.md](DESIGN.md) for the allocation proof (D32) and the ITCH day (M7 results). The table was measured before self-trade prevention (M13),
-which costs the fast book about 4% on ungrouped flow ([M13 results](DESIGN.md#m13-results-2026-10-08)).
+and [DESIGN.md](DESIGN.md) for the allocation proof (D32) and the ITCH day (M7 results). The table was measured before self-trade prevention (M13)
+and iceberg orders (M15), which cost the fast book about 4% and 3.5% on flow that uses neither
+([M13 results](DESIGN.md#m13-results-2026-10-08), [M15 results](DESIGN.md#m15-results-2026-10-09)).
 
 ![AAPL latency percentiles, reference vs fast book](bench/results/2026-10-08-0434/latency-aapl.svg)
 
@@ -42,6 +43,8 @@ that part of the tail is the machine (interrupts, preemption), not the code. [Mo
 - **Market data:** level updates coalesced per command, with sequence numbers, heartbeats and snapshots. A consumer detects gaps and recovers.
 - **Self-trade prevention:** an order can carry an STP group and an action (cancel newest, oldest or both). Two orders of one group never trade;
   FOK stays exact with it, and the fast book's order still fits in 32 bytes (D67–D73).
+- **Iceberg orders:** `peak=<n>` shows n at a time; each new slice goes to the back of its level, and one taker can take several slices.
+  FOK counts hidden quantity (with an STP subtlety, D86), market data shows slices only, and the fast book's order still fits in 32 bytes (D83–D89).
 - **Crash recovery:** `lob engine` journals each batch, fsyncs it once (group commit), and only then applies it, so no event is ever sent
   for a command a crash could lose. It writes atomic snapshots of the logical book. After a crash, the snapshot plus the journal after it
   give the same digest as a run that never stopped. That's checked at every cut point of the journal, and against the real binary killed with SIGKILL (D74–D82).
@@ -56,7 +59,8 @@ that part of the tail is the machine (interrupts, preemption), not the code. [Mo
   the books agree on any session, a consumer survives any loss pattern (D49–D52).
 - **Real data:** a NASDAQ ITCH 5.0 day rebuilt with zero errors (D38), and one symbol's flow translated into engine commands so our matching
   is compared with NASDAQ's (D54).
-- **Fuzzing** (cargo-fuzz): every decoder of outside input (journal, feed, ITCH, text) never panics and round-trips what it accepts (D65).
+- **Fuzzing** (cargo-fuzz): every decoder of outside input (journal, feed, ITCH, text, snapshots) never panics and round-trips what it accepts (D65),
+  and a differential target runs any bytes as a session on both books with the ledger watching (D89).
 - **Miri** on the lock-free ring: no undefined behaviour or data races. Weakening any of its six `Acquire`/`Release` operations to `Relaxed`
   is caught, which no test on x86 hardware can do (D64).
 - **Mutation checks:** every milestone plants bugs on purpose and confirms a test catches each one.
@@ -94,6 +98,25 @@ accepted 4
 accepted 5
 stp-cancelled 4 10
 trade 5 1 buy 10 10100
+```
+
+Order 6 is an iceberg: 30 to sell, 10 showing at a time. Order 7 arrives later at the same price. A market buy takes the 60 left at 10100,
+then order 6's slice; the next slice shows at the back of the level, so order 7 trades before it.
+
+```
+> limit 6 sell 30 10110 peak=10
+accepted 6
+> limit 7 sell 5 10110
+accepted 7
+> market 8 buy 75
+accepted 8
+trade 8 1 buy 60 10100
+trade 8 6 buy 10 10110
+replenished 6 10
+trade 8 7 buy 5 10110
+> book
+ask 10110 10 (1)
+bid 10050 50 (1)
 ```
 
 Record synthetic order flow and replay it deterministically:
@@ -155,5 +178,6 @@ no risk checks beyond a fat-finger quantity limit, no replica to fail over to.
 - [x] **M12** Final write-up: DESIGN overview and index, percentile plots, this README
 - [x] **M13** Self-trade prevention: STP groups, three actions, FOK and modify rules, journal v2
 - [x] **M14** Crash recovery: logical-book snapshots, group commit, recovery proved by digest at every crash point
+- [x] **M15** Iceberg orders: slices refilled at the back of the queue, FOK and STP rules, snapshot v3, journal v3
 
-Each milestone's decisions are in [DESIGN.md](DESIGN.md), numbered D1–D82.
+Each milestone's decisions are in [DESIGN.md](DESIGN.md), numbered D1–D89.
