@@ -436,6 +436,13 @@ mod tests {
 
     #[test]
     fn rejects_bad_header() {
+        let valid = write(&sample());
+        for offset in [0, 7, valid.len() as u64 + 1] {
+            assert_eq!(
+                read_journal_from(&valid, offset),
+                Err(JournalError::OffsetOutOfRange(offset))
+            );
+        }
         assert_eq!(read_journal(b"LOB"), Err(JournalError::BadMagic));
         assert_eq!(read_journal(b"XXXX\x01\0\0\0"), Err(JournalError::BadMagic));
         assert_eq!(

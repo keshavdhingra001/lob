@@ -55,7 +55,8 @@ fn sigkill_at_any_moment_recovers_to_the_uninterrupted_digest() {
 
     // Each round restarts the engine (recovering what the last one left) and kills it
     // after a delay; the delays spread the kills over appends, fsyncs and snapshot writes.
-    let mut mid_run_kills = 0;
+    // Snapshots every 50 commands, so most kills land after one and recovery uses it.
+    let (mut mid_run_kills, mut durable) = (0, 0);
     for delay_ms in [5, 40, 90, 15, 150, 60, 250] {
         let mut child = Process::new(LOB)
             .args([
@@ -64,7 +65,7 @@ fn sigkill_at_any_moment_recovers_to_the_uninterrupted_digest() {
                 journal.as_os_str(),
                 snap.as_os_str(),
             ])
-            .args(["4000", "batch", "8"])
+            .args(["50", "batch", "8"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -84,6 +85,9 @@ fn sigkill_at_any_moment_recovers_to_the_uninterrupted_digest() {
             digest_of(&commands[..kept]),
             "after the {delay_ms} ms kill"
         );
+        // A restart resumes: what was durable stays durable.
+        assert!(kept >= durable, "kept {kept} after {durable} were durable");
+        durable = kept;
         if kept < commands.len() {
             mid_run_kills += 1;
         }
@@ -96,4 +100,7 @@ fn sigkill_at_any_moment_recovers_to_the_uninterrupted_digest() {
     let (n, digest) = run(&["engine".as_ref(), &input, &journal, &snap]);
     assert_eq!((n, digest), (commands.len(), digest_of(&commands)));
     assert_eq!(fs::read(&journal).unwrap(), fs::read(&input).unwrap());
+    // And the last snapshot, plus the journal after it, still recovers the whole run.
+    let (n, digest) = run(&["recover".as_ref(), &journal, &snap]);
+    assert_eq!((n, digest), (commands.len(), digest_of(&commands)));
 }

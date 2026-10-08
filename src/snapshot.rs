@@ -398,6 +398,39 @@ mod tests {
     }
 
     #[test]
+    fn every_value_has_one_spelling() {
+        // Edit a field, then re-seal the CRC so only the field check can refuse it.
+        let edited = |at: usize, v: u8| {
+            let mut b = snapshot(book::<RefBook>(SESSION).state()).encode();
+            b[at] = v;
+            let n = b.len() - TRAILER_LEN;
+            let crc = crc32fast::hash(&b[..n]);
+            b[n..].copy_from_slice(&crc.to_le_bytes());
+            Snapshot::decode(&b)
+        };
+        // The first record (order 1) is ungrouped: give it an action byte.
+        let first = HEADER_LEN;
+        assert_eq!(
+            edited(first + 28, 1),
+            Err(SnapshotError::Invalid("stp action without a group"))
+        );
+        assert_eq!(
+            edited(first + 25, 2),
+            Err(SnapshotError::Invalid("bad post-only byte"))
+        );
+        // No last id with a nonzero id: flag at 24, id at 25.
+        let mut b = snapshot(RefBook::new().state()).encode();
+        b[25] = 1;
+        let n = b.len() - TRAILER_LEN;
+        let crc = crc32fast::hash(&b[..n]);
+        b[n..].copy_from_slice(&crc.to_le_bytes());
+        assert_eq!(
+            Snapshot::decode(&b),
+            Err(SnapshotError::Invalid("bad last id"))
+        );
+    }
+
+    #[test]
     fn validation_refuses_impossible_books() {
         let config = BookConfig {
             tick_size: 2,
@@ -457,6 +490,11 @@ mod tests {
             ..order(1, Buy, 2)
         };
         assert_eq!(check(9, vec![big]), Err("resting quantity out of range"));
+        let empty = RestingOrder {
+            qty: Qty(0),
+            ..order(1, Buy, 2)
+        };
+        assert_eq!(check(9, vec![empty]), Err("resting quantity out of range"));
         let huge = BookState {
             config: BookConfig {
                 tick_size: 1,
