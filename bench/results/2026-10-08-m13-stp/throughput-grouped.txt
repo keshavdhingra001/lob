@@ -1,0 +1,6 @@
+reference     118.4 ms  16.89 M/s        195.8 ms  10.21 M/s   digest fd6f6e2972298184
+fast           78.0 ms  25.63 M/s        157.8 ms  12.68 M/s   digest fd6f6e2972298184
+reference     119.6 ms  16.72 M/s        209.2 ms   9.56 M/s   digest fd6f6e2972298184
+fast           86.1 ms  23.24 M/s        188.3 ms  10.62 M/s   digest fd6f6e2972298184
+reference     136.6 ms  14.64 M/s        234.9 ms   8.51 M/s   digest fd6f6e2972298184
+fast           88.8 ms  22.53 M/s        187.7 ms  10.65 M/s   digest fd6f6e2972298184

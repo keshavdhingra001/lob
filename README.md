@@ -16,7 +16,8 @@ a simple one and a fast one, must produce the same events for every command, and
 - **A whole NASDAQ day** (282M messages, every symbol's book rebuilt): 0 errors, 0 orders left at the end of the day, every execution message at the best price.
 
 Sources: [BENCHMARKS.md](BENCHMARKS.md) (method, machine, every table tied to raw output in [`bench/results/`](bench/results/)),
-and [DESIGN.md](DESIGN.md) for the allocation proof (D32) and the ITCH day (M7 results).
+and [DESIGN.md](DESIGN.md) for the allocation proof (D32) and the ITCH day (M7 results). The table was measured before self-trade prevention (M13),
+which costs the fast book about 4% on ungrouped flow ([M13 results](DESIGN.md#m13-results-2026-10-08)).
 
 ![AAPL latency percentiles, reference vs fast book](bench/results/2026-10-08-0434/latency-aapl.svg)
 
@@ -39,6 +40,8 @@ that part of the tail is the machine (interrupts, preemption), not the code. [Mo
 - **The pipeline:** a hand-written bounded SPSC ring (cache-line-padded indices, `Acquire`/`Release`). Its output equals one thread's byte for byte.
   At full load three threads are *slower* than one: the output stage dominates, and the hand-offs between cores cost more than they save.
 - **Market data:** level updates coalesced per command, with sequence numbers, heartbeats and snapshots. A consumer detects gaps and recovers.
+- **Self-trade prevention:** an order can carry an STP group and an action (cancel newest, oldest or both). Two orders of one group never trade;
+  FOK stays exact with it, and the fast book's order still fits in 32 bytes (D67–D73).
 
 ## How correctness is checked
 
@@ -78,6 +81,18 @@ bid 10050 50 (1)
 Prices are integer ticks (`10025` is $100.25 with a one-cent tick). A trade line reads
 `trade <taker> <maker> <taker side> <qty> <price>`.
 
+Orders 4 and 5 below share STP group 7, so they can't trade: order 5's action, cancel oldest (`co`),
+cancels the resting order 4, and order 5 trades with the next ask instead.
+
+```
+> limit 4 sell 10 10090 g=7 stp=cn
+accepted 4
+> limit 5 buy 10 10100 g=7 stp=co
+accepted 5
+stp-cancelled 4 10
+trade 5 1 buy 10 10100
+```
+
 Record synthetic order flow and replay it deterministically:
 
 ```bash
@@ -116,7 +131,7 @@ scripts/report.sh
 ## Not built
 
 No network gateway (input is a journal file, so every latency is in-process), one symbol, no auctions, no hidden or iceberg orders,
-no self-trade prevention, no risk checks beyond a fat-finger quantity limit, no crash recovery beyond replaying the journal.
+no risk checks beyond a fat-finger quantity limit, no crash recovery beyond replaying the journal.
 [DESIGN.md](DESIGN.md#not-built-d61) says where each would go.
 
 ## Build history
@@ -134,5 +149,6 @@ no self-trade prevention, no risk checks beyond a fat-finger quantity limit, no 
 - [x] **M10** Property tests (proptest): codecs, journal damage, engine and feed
 - [x] **M11** Benchmark report: one script, real ITCH flow through both books, BENCHMARKS.md
 - [x] **M12** Final write-up: DESIGN overview and index, percentile plots, this README
+- [x] **M13** Self-trade prevention: STP groups, three actions, FOK and modify rules, journal v2
 
-Each milestone's decisions are in [DESIGN.md](DESIGN.md), numbered D1–D66.
+Each milestone's decisions are in [DESIGN.md](DESIGN.md), numbered D1–D73.

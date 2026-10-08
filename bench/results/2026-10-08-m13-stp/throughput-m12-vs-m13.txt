@@ -1,0 +1,18 @@
+== old run 1
+reference     113.9 ms  17.57 M/s        192.5 ms  10.39 M/s   digest b3df3bac1e73d7f6
+fast           68.1 ms  29.37 M/s        148.6 ms  13.46 M/s   digest b3df3bac1e73d7f6
+== new run 1
+reference     107.9 ms  18.54 M/s        190.6 ms  10.49 M/s   digest b3df3bac1e73d7f6
+fast           71.3 ms  28.06 M/s        152.7 ms  13.10 M/s   digest b3df3bac1e73d7f6
+== old run 2
+reference     113.9 ms  17.57 M/s        192.0 ms  10.42 M/s   digest b3df3bac1e73d7f6
+fast           68.4 ms  29.23 M/s        153.3 ms  13.05 M/s   digest b3df3bac1e73d7f6
+== new run 2
+reference     111.1 ms  18.01 M/s        191.9 ms  10.42 M/s   digest b3df3bac1e73d7f6
+fast           70.7 ms  28.30 M/s        150.5 ms  13.29 M/s   digest b3df3bac1e73d7f6
+== old run 3
+reference     111.8 ms  17.88 M/s        201.5 ms   9.93 M/s   digest b3df3bac1e73d7f6
+fast          116.9 ms  17.11 M/s        264.9 ms   7.55 M/s   digest b3df3bac1e73d7f6
+== new run 3
+reference     139.0 ms  14.39 M/s        227.4 ms   8.80 M/s   digest b3df3bac1e73d7f6
+fast           72.8 ms  27.47 M/s        155.2 ms  12.88 M/s   digest b3df3bac1e73d7f6

@@ -18,7 +18,7 @@ so later ones sometimes replace earlier ones, and each replaced entry says what 
   obviously correct. The **fast book** (D19–D21, D30–D34) uses a slab of orders, an intrusive list per level, a tick-indexed price ladder
   with a bitmap, and O(1) cancel.
 - **Matching:** price-time priority, trades at the maker's price (D9), modify with exchange priority rules (D11), IOC / FOK / post-only (D12),
-  tick and max-quantity checks (D14).
+  tick and max-quantity checks (D14), self-trade prevention by STP group (D67–D73).
 - **Input and output:** a checksummed binary command journal (D15, D16); a sequence-numbered event stream with a 64-bit digest (D17);
   an L2 feed with gap recovery (D40–D44); a three-thread pipeline whose output equals one thread's byte for byte (D45–D47).
 - **How it's checked:** scenario scripts and an invariant checker (D10), a conservation ledger built from events alone (D13), differential
@@ -33,6 +33,7 @@ so later ones sometimes replace earlier ones, and each replaced entry says what 
 |---|---|
 | Core model: prices, ids, determinism, output buffer, text format | D2–D6 |
 | Matching rules and order types | D9, D11, D12, D14, D30 |
+| Self-trade prevention | D67–D73, M13 results |
 | Reference book | D8 |
 | Fast book | D19–D21, D31, D33, D34 |
 | No allocation on the hot path | D5, D32 |
@@ -62,7 +63,7 @@ What a production exchange has that this engine doesn't, and where each would go
 - **More than one symbol.** One book per symbol, symbols sharded across matching threads, a ring per shard (D7). Built for one symbol only.
 - **Auctions** (the opening and closing cross). ITCH cross executions only remove shares (D54).
 - **Hidden, iceberg, pegged and stop orders.** The FOK pre-scan (D12) is correct only because all quantity is visible.
-- **Self-trade prevention.** Needs an owner field on every order (D12), and so a new journal version (D15).
+- **Decrement-and-cancel self-trade prevention** (CME's fourth mode; D68). The three other modes are built (D67–D73).
 - **Pre-trade risk** beyond the fat-finger quantity limit: position and notional limits (D14).
 - **Crash recovery and replicas.** The journal is a recording, not a WAL: it isn't fsynced (D15). Recovery would be "replay the journal" (D4),
   but there are no book snapshots to start from, and no replica.
@@ -1261,3 +1262,16 @@ Each target ran 10 minutes on 2026-10-08 (all with the text dictionary, which on
   Ungrouped commands keep tags 1 and 2 byte for byte, so the decoder reads version 1 files unchanged. One canonical encoding still holds (D50):
   tag 5 or 6 with group 0 is invalid.
   (This refines the consult's "append the fields to limit and market": separate tags cost ungrouped orders nothing and keep v1 readable for free.)
+
+### M13 results (2026-10-08)
+- **Correctness:** both books pass the two STP scenario files, written by hand from D70/D71 before either book ran them. Differential testing with
+  grouped flows: 40k generated commands × 3 seeds, 10k edge-case × 20 and wide-price × 5 in `cargo test`, and 10M generated + 5M edge-case in the
+  release run, all event for event with the ledger's STP checks on. The golden digest is unchanged.
+- **Fuzzing:** 5 minutes each on the changed decoders, no crash. `journal`: 77M inputs, coverage 333 edges (320 in M12, so it reaches tags 5 and 6).
+  `text` (with `g=` and `stp=` in the dictionary): 54M inputs.
+- **Mutation-checked:** 34 planted bugs across the two books, `Stp::conflict`, the text and journal codecs, the ledger and the generator: **34 of 34 caught**.
+  One gap was found and closed while writing them: nothing checked that event tags are distinct, so `stp-cancelled` reusing tag 5 would have passed.
+- **Cost** ([raw output](bench/results/2026-10-08-m13-stp/)), `lob bench` apply-only on gen2m, no groups, M12 and M13 binaries alternated on a quiet machine:
+  fast book 29.2–29.4 M/s before, 27.5–28.3 M/s after, **about 4% slower**. The taker now checks `stp` before every fill and `Node` writes two more fields.
+  The reference book didn't move beyond noise (17.6–17.9 vs 18.0–18.5 M/s). With 3 groups (a different workload, mostly more cancels) the fast book
+  runs 22.5–25.6 M/s.
