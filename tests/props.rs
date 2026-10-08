@@ -28,7 +28,7 @@ enum NewId {
 
 #[derive(Clone, Copy, Debug)]
 enum Op {
-    Limit(NewId, Side, u64, i64, TimeInForce, Option<Stp>),
+    Limit(NewId, Side, u64, i64, TimeInForce, Option<u64>, Option<Stp>),
     Market(NewId, Side, u64, Option<Stp>),
     /// Targets are the k-th most recent id (0: the latest), so some are finished or were
     /// never accepted. Relative targets keep their meaning when shrinking removes an
@@ -65,9 +65,11 @@ fn op() -> impl Strategy<Value = Op> {
             action,
         })),
     ];
+    // No peak first; else 0..14, so valid icebergs and every bad-peak case occur (D83).
+    let peak = prop_oneof![3 => Just(None), 1 => (0..14u64).prop_map(Some)];
     prop_oneof![
-        5 => (new_id.clone(), side.clone(), qty.clone(), price.clone(), tif, stp.clone())
-            .prop_map(|(i, s, q, p, t, g)| Op::Limit(i, s, q, p, t, g)),
+        5 => (new_id.clone(), side.clone(), qty.clone(), price.clone(), tif, peak, stp.clone())
+            .prop_map(|(i, s, q, p, t, k, g)| Op::Limit(i, s, q, p, t, k, g)),
         1 => (new_id, side, qty.clone(), stp).prop_map(|(i, s, q, g)| Op::Market(i, s, q, g)),
         2 => (target.clone(), qty, price).prop_map(|(t, q, p)| Op::Modify(t, q, p)),
         2 => target.prop_map(Op::Cancel),
@@ -94,13 +96,13 @@ fn session(ops: &[Op]) -> Vec<Command> {
     let mut commands = Vec::with_capacity(ops.len());
     for &op in ops {
         commands.push(match op {
-            Op::Limit(id, side, qty, price, tif, stp) => Command::Limit {
+            Op::Limit(id, side, qty, price, tif, peak, stp) => Command::Limit {
                 id: new_id(id, &mut next),
                 side,
                 qty: Qty(qty),
                 price: Price(price),
                 tif,
-                peak: None,
+                peak: peak.map(Qty),
                 stp,
             },
             Op::Market(id, side, qty, stp) => Command::Market {

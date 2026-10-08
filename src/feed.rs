@@ -64,12 +64,15 @@ pub struct Snapshot {
     pub asks: Vec<Level>,
 }
 
-/// A resting order as the publisher sees it.
+/// A resting order as the publisher sees it. Only `shown` counts towards its level: an
+/// iceberg's hidden quantity is never published (D88).
 #[derive(Clone, Copy, Debug)]
 struct Resting {
     side: Side,
     price: Price,
-    open: u64,
+    shown: u64,
+    hidden: u64,
+    peak: Option<u64>,
 }
 
 /// The order the current command is working: a new order, or a modified one (D11 lets it
@@ -81,6 +84,7 @@ struct Taker {
     /// `None` for a market order, which never rests.
     price: Option<Price>,
     open: u64,
+    peak: Option<u64>,
 }
 
 /// Builds the incremental feed from commands and their events, without looking inside
@@ -144,7 +148,8 @@ impl Publisher {
                 let price = t
                     .price
                     .ok_or_else(|| format!("market order {} left open", t.id))?;
-                self.rest(t.id, t.side, price, t.open)?;
+                let shown = t.peak.map_or(t.open, |peak| peak.min(t.open));
+                self.rest(t.id, t.side, price, shown, t.open - shown, t.peak)?;
             }
         }
         // Stable sort: for a level touched twice, the first entry holds its state before the command.
@@ -158,6 +163,9 @@ impl Publisher {
                 .get(&price)
                 .copied()
                 .unwrap_or(empty(price));
+            if now.qty.0 == 0 && now.orders > 0 {
+                return Err(format!("after `{cmd}`: {side} {price} shows nothing"));
+            }
             if now != before {
                 self.seq += 1;
                 out.push(Msg::Level {
@@ -187,17 +195,27 @@ impl Publisher {
                     side: order.side,
                     price: order.limit,
                     open: order.qty.0,
+                    peak: order.peak.map(|p| p.0),
                 })?;
             }
             Event::Rejected { .. } => {}
             Event::Modified { id, qty, price } => {
                 let r = self.orders.remove(&id).ok_or("order isn't resting")?;
-                self.reduce(r.side, r.price, r.open, true)?;
+                self.reduce(r.side, r.price, r.shown, true)?;
+                let open = r.shown + r.hidden;
+                if price == r.price && qty.0 <= open {
+                    // In place (D11), hidden quantity first (D88).
+                    let cut = open - qty.0;
+                    let from_hidden = cut.min(r.hidden);
+                    let (shown, hidden) = (r.shown - (cut - from_hidden), r.hidden - from_hidden);
+                    return self.rest(id, r.side, price, shown, hidden, r.peak);
+                }
                 self.start_taker(Taker {
                     id,
                     side: r.side,
                     price: Some(price),
                     open: qty.0,
+                    peak: r.peak,
                 })?;
             }
             Event::Trade {
@@ -217,8 +235,10 @@ impl Publisher {
                 if m.price != price {
                     return Err("not at the maker's price".into());
                 }
-                m.open = m.open.checked_sub(qty.0).ok_or("maker overfilled")?;
-                let (side, gone) = (m.side, m.open == 0);
+                m.shown = m.shown.checked_sub(qty.0).ok_or("maker overfilled")?;
+                // An iceberg with hidden quantity left stays, showing nothing until its
+                // replenish, which must follow in this command.
+                let (side, gone) = (m.side, m.shown == 0 && m.hidden == 0);
                 if gone {
                     self.orders.remove(&maker);
                 }
@@ -240,15 +260,25 @@ impl Publisher {
                     }
                     _ => {
                         let r = self.orders.remove(&id).ok_or("order isn't live")?;
-                        self.reduce(r.side, r.price, r.open, true)?;
-                        r.open
+                        self.reduce(r.side, r.price, r.shown, true)?;
+                        r.shown + r.hidden
                     }
                 };
                 if open != remaining.0 {
                     return Err(format!("{open} was open"));
                 }
             }
-            Event::Replenished { .. } => return Err("icebergs come in M15 section 2".into()),
+            Event::Replenished { id, qty } => {
+                let r = self.orders.get_mut(&id).ok_or("order isn't resting")?;
+                let want = r.peak.map_or(0, |peak| peak.min(r.hidden));
+                if r.shown != 0 || qty.0 == 0 || qty.0 != want {
+                    return Err(format!("{} shown, {} hidden", r.shown, r.hidden));
+                }
+                r.shown = qty.0;
+                r.hidden -= qty.0;
+                let (side, price) = (r.side, r.price);
+                self.touch(side, price).qty.0 += qty.0;
+            }
         }
         Ok(())
     }
@@ -278,16 +308,27 @@ impl Publisher {
         level
     }
 
-    fn rest(&mut self, id: OrderId, side: Side, price: Price, open: u64) -> Result<(), String> {
-        if self
-            .orders
-            .insert(id, Resting { side, price, open })
-            .is_some()
-        {
+    fn rest(
+        &mut self,
+        id: OrderId,
+        side: Side,
+        price: Price,
+        shown: u64,
+        hidden: u64,
+        peak: Option<u64>,
+    ) -> Result<(), String> {
+        let order = Resting {
+            side,
+            price,
+            shown,
+            hidden,
+            peak,
+        };
+        if self.orders.insert(id, order).is_some() {
             return Err(format!("order {id} rests twice"));
         }
         let level = self.touch(side, price);
-        level.qty.0 += open;
+        level.qty.0 += shown;
         level.orders += 1;
         Ok(())
     }
@@ -300,8 +341,12 @@ impl Publisher {
             .orders
             .checked_sub(gone as usize)
             .ok_or("level has no orders")?;
-        // Every resting order has some quantity open, so a level at 0 has no orders left.
-        if level.qty.0 == 0 {
+        // A level can show 0 with an iceberg about to replenish (checked per command), but
+        // one with no orders shows nothing.
+        if level.orders == 0 {
+            if level.qty.0 != 0 {
+                return Err("level has quantity but no orders".into());
+            }
             match side {
                 Side::Buy => self.bids.remove(&price),
                 Side::Sell => self.asks.remove(&price),
@@ -554,6 +599,44 @@ mod tests {
                 lvl(4, Side::Buy, 99, 0, 0, false),
                 lvl(5, Side::Buy, 101, 3, 1, false),
                 lvl(6, Side::Sell, 101, 0, 0, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_iceberg_shows_only_its_slice() {
+        let out = feed(&[
+            "limit 1 sell 10 100 peak=4",
+            "limit 2 buy 5 100",
+            "modify 1 2 100",
+            "limit 3 buy 6 100 peak=1",
+        ]);
+        assert_eq!(out[0], [lvl(1, Side::Sell, 100, 4, 1, true)]);
+        let trade = |seq, qty| Msg::Trade {
+            seq,
+            aggressor: Side::Buy,
+            price: Price(100),
+            qty: Qty(qty),
+            last: false,
+        };
+        // 4 trades, the next slice of 4 shows, 1 more trades: the level ends at 3.
+        assert_eq!(
+            out[1],
+            [
+                trade(2, 4),
+                trade(3, 1),
+                lvl(4, Side::Sell, 100, 3, 1, true)
+            ]
+        );
+        // 5 open, 3 shown: cutting to 2 takes the 2 hidden first, then 1 shown.
+        assert_eq!(out[2], [lvl(5, Side::Sell, 100, 2, 1, true)]);
+        // A new iceberg trades its full size, then shows only its peak.
+        assert_eq!(
+            out[3],
+            [
+                trade(6, 2),
+                lvl(7, Side::Buy, 100, 1, 1, false),
+                lvl(8, Side::Sell, 100, 0, 0, true),
             ]
         );
     }

@@ -18,8 +18,16 @@ pub fn new_order_id(rng: &mut Rng, next_id: &mut u64) -> OrderId {
 
 /// Edge-case flow: narrow prices, small quantities, some zero, oversized (max 12) and
 /// off-tick values, and reused ids. Crossing, partial fills, sweeps and FOK edge cases
-/// are all common. New orders carry STP groups from `1..=groups` (none if 0).
-pub fn random_command(rng: &mut Rng, next_id: &mut u64, tick: i64, groups: u16) -> Command {
+/// are all common. New orders carry STP groups from `1..=groups` (none if 0). With
+/// `icebergs`, a third of the limit orders carry a peak in 0..14, so valid icebergs and
+/// every bad-peak case are common; without, no number is drawn for it.
+pub fn random_command(
+    rng: &mut Rng,
+    next_id: &mut u64,
+    tick: i64,
+    groups: u16,
+    icebergs: bool,
+) -> Command {
     let side = if rng.chance(50) {
         Side::Buy
     } else {
@@ -46,7 +54,7 @@ pub fn random_command(rng: &mut Rng, next_id: &mut u64, tick: i64, groups: u16) 
                 qty,
                 price,
                 tif,
-                peak: None,
+                peak: (icebergs && rng.chance(33)).then(|| Qty(rng.below(14))),
                 stp: random_stp(rng, groups),
             }
         }

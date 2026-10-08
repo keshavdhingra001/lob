@@ -22,7 +22,7 @@ fn session(seed: u64, n: usize) -> Vec<Command> {
     let mut rng = Rng::new(seed);
     let mut next_id = 1;
     (0..n)
-        .map(|_| common::random_command(&mut rng, &mut next_id, 1, 2))
+        .map(|_| common::random_command(&mut rng, &mut next_id, 1, 2, true))
         .collect()
 }
 
@@ -124,7 +124,7 @@ fn event_byte_offset(stream: &[u8], n: usize) -> usize {
             2 => 18,
             3 => 33,
             4 => 42,
-            5 | 6 => 25,
+            5..=7 => 25,
             t => panic!("bad tag {t}"),
         };
     }

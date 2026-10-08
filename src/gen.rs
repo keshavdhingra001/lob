@@ -12,8 +12,9 @@
 //! real venues.
 //!
 //! With `stp_groups` set, new orders also carry STP groups (D67), drawn from a few so
-//! that self-trades are constantly attempted. The default has none, and draws exactly
-//! the numbers it always did, so the golden digest is unchanged.
+//! that self-trades are constantly attempted. With `iceberg_pct` set, that share of the
+//! passive orders of 20 lots or more are icebergs showing a fifth (D89). The defaults have
+//! neither, and draw exactly the numbers they always did, so the golden digest is unchanged.
 
 use std::num::NonZeroU16;
 
@@ -30,6 +31,8 @@ pub struct GenConfig {
     pub max_live: usize,
     /// New orders get a group in `1..=stp_groups`, or none, with equal odds. 0: never.
     pub stp_groups: u16,
+    /// Percent of passive orders of 20+ lots that are icebergs. 0: none.
+    pub iceberg_pct: u64,
 }
 
 impl Default for GenConfig {
@@ -39,6 +42,7 @@ impl Default for GenConfig {
             start_mid: 10_000,
             max_live: 5_000,
             stp_groups: 0,
+            iceberg_pct: 0,
         }
     }
 }
@@ -58,6 +62,7 @@ pub struct Generator {
     next_id: u64,
     max_live: usize,
     stp_groups: u16,
+    iceberg_pct: u64,
     live: Vec<Live>,
 }
 
@@ -84,6 +89,7 @@ impl Generator {
             next_id: 1,
             max_live: config.max_live,
             stp_groups: config.stp_groups,
+            iceberg_pct: config.iceberg_pct,
             live: Vec::new(),
         }
     }
@@ -135,6 +141,17 @@ impl Generator {
     }
 
     fn limit(&mut self, side: Side, price: i64, qty: u64, tif: TimeInForce) -> Command {
+        self.order(side, price, qty, tif, None)
+    }
+
+    fn order(
+        &mut self,
+        side: Side,
+        price: i64,
+        qty: u64,
+        tif: TimeInForce,
+        peak: Option<Qty>,
+    ) -> Command {
         let id = self.fresh_id();
         if matches!(tif, TimeInForce::Gtc | TimeInForce::PostOnly) {
             self.live.push(Live {
@@ -150,7 +167,7 @@ impl Generator {
             qty: Qty(qty),
             price: Price(price),
             tif,
-            peak: None,
+            peak,
             stp: self.stp(),
         }
     }
@@ -164,7 +181,10 @@ impl Generator {
         } else {
             TimeInForce::Gtc
         };
-        self.limit(side, price, qty, tif)
+        // `&&` keeps the default flow's draws as they were.
+        let iceberg = self.iceberg_pct > 0 && qty >= 20 && self.rng.chance(self.iceberg_pct);
+        let peak = iceberg.then_some(Qty(qty / 5));
+        self.order(side, price, qty, tif, peak)
     }
 
     fn cancel(&mut self) -> Command {

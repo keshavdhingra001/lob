@@ -50,10 +50,11 @@ commands:
 const USAGE: &str = "\
 usage:
   lob                                   interactive REPL
-  lob gen <seed> <count> <journal> [max-live] [stp-groups]   write generated commands to a
+  lob gen <seed> <count> <journal> [max-live] [stp-groups] [iceberg-pct]   write generated commands to a
                                         journal file (max-live: orders the generator keeps alive,
                                         default 5000; stp-groups: new orders carry one of this many
-                                        STP groups or none, default 0)
+                                        STP groups or none, default 0; iceberg-pct: share of passive
+                                        orders of 20+ lots that are icebergs, default 0)
   lob replay <journal> [events-file]    replay a journal, print stats and digest
   lob bench <journal>                   replay through both books, compare speed and digests
   lob gen-queue <orders> <journal>      worst case for cancel: one deep queue, random cancels
@@ -94,10 +95,8 @@ fn main() -> ExitCode {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let result = match args[..] {
         [] => repl().map_err(|e| e.to_string()),
-        ["gen", seed, count, path] => gen(seed, count, path, None, None),
-        ["gen", seed, count, path, max_live] => gen(seed, count, path, Some(max_live), None),
-        ["gen", seed, count, path, max_live, groups] => {
-            gen(seed, count, path, Some(max_live), Some(groups))
+        ["gen", seed, count, path, ref rest @ ..] if rest.len() <= 3 => {
+            gen(seed, count, path, rest)
         }
         ["replay", path] => replay_file(path, None),
         ["replay", path, events] => replay_file(path, Some(events)),
@@ -164,21 +163,16 @@ fn write_journal(path: &str, commands: impl IntoIterator<Item = Command>) -> Res
     journal.finish().map(drop).map_err(err)
 }
 
-fn gen(
-    seed: &str,
-    count: &str,
-    path: &str,
-    max_live: Option<&str>,
-    groups: Option<&str>,
-) -> Result<(), String> {
+/// `lob gen <seed> <count> <journal> [max-live] [stp-groups] [iceberg-pct]`.
+fn gen(seed: &str, count: &str, path: &str, optional: &[&str]) -> Result<(), String> {
     let seed = parse_arg("seed", seed)?;
     let count = parse_arg("count", count)?;
     let defaults = GenConfig::default();
-    let max_live = max_live.map_or(Ok(defaults.max_live), |m| parse_arg("max-live", m))?;
-    let stp_groups = groups.map_or(Ok(defaults.stp_groups), |g| parse_arg("stp-groups", g))?;
+    let arg = |i: usize, name, default| optional.get(i).map_or(Ok(default), |a| parse_arg(name, a));
     let config = GenConfig {
-        max_live,
-        stp_groups,
+        max_live: arg(0, "max-live", defaults.max_live as u64)? as usize,
+        stp_groups: u16::try_from(arg(1, "stp-groups", 0)?).map_err(|e| e.to_string())?,
+        iceberg_pct: arg(2, "iceberg-pct", defaults.iceberg_pct)?,
         ..GenConfig::with_seed(seed)
     };
     write_journal(path, Generator::new(config).take(count))?;

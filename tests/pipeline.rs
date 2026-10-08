@@ -13,7 +13,7 @@ fn random(seed: u64, n: usize) -> Vec<Command> {
     let mut rng = Rng::new(seed);
     let mut next_id = 1;
     (0..n)
-        .map(|_| random_command(&mut rng, &mut next_id, 1, 0))
+        .map(|_| random_command(&mut rng, &mut next_id, 1, 0, false))
         .collect()
 }
 

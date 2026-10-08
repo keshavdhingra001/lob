@@ -128,10 +128,10 @@ fn run<B: OrderBook>(config: BookConfig, commands: impl Iterator<Item = Command>
     hash.finish()
 }
 
-fn random(seed: u64, n: usize, groups: u16) -> impl Iterator<Item = Command> {
+fn random(seed: u64, n: usize, groups: u16, icebergs: bool) -> impl Iterator<Item = Command> {
     let mut rng = Rng::new(seed);
     let mut next_id = 1;
-    (0..n).map(move |_| random_command(&mut rng, &mut next_id, 1, groups))
+    (0..n).map(move |_| random_command(&mut rng, &mut next_id, 1, groups, icebergs))
 }
 
 const EDGE: BookConfig = BookConfig {
@@ -141,11 +141,14 @@ const EDGE: BookConfig = BookConfig {
 
 #[test]
 fn level_updates_are_exactly_the_depth_change() {
-    // Groups 0 and 2: STP cancels change depth like any cancel.
-    for (seed, groups) in (0..10).flat_map(|s| [(s, 0), (s, 2)]) {
-        let a = run::<RefBook>(EDGE, random(seed, 3_000, groups));
-        let b = run::<FastBook>(EDGE, random(seed, 3_000, groups));
-        assert_eq!(a, b, "seed {seed}: the two books' feeds differ");
+    // Groups 0 and 2: STP cancels change depth like any cancel. Icebergs: only their
+    // slices show, and a replenish changes a level's quantity but not its order count (D88).
+    for seed in 0..10 {
+        for (groups, icebergs) in [(0, false), (2, false), (0, true), (2, true)] {
+            let a = run::<RefBook>(EDGE, random(seed, 3_000, groups, icebergs));
+            let b = run::<FastBook>(EDGE, random(seed, 3_000, groups, icebergs));
+            assert_eq!(a, b, "seed {seed}: the two books' feeds differ");
+        }
     }
 }
 
@@ -213,7 +216,7 @@ fn lossy(
 fn a_consumer_recovers_from_loss_and_duplicates() {
     for seed in 0..10 {
         let n = 3_000;
-        let (stats, checked) = lossy(seed, random(seed, n, 0), Consumer::new(), 3);
+        let (stats, checked) = lossy(seed, random(seed, n, 0, false), Consumer::new(), 3);
         // Guard against a test that stopped testing: loss, recovery and checks all happen.
         assert!(
             stats.gaps > 10 && stats.snapshots > 10,
@@ -229,7 +232,7 @@ fn a_consumer_recovers_from_loss_and_duplicates() {
 
 #[test]
 fn duplicates_alone_need_no_snapshot() {
-    let (stats, checked) = lossy(1, random(1, 3_000, 0), Consumer::new(), 0);
+    let (stats, checked) = lossy(1, random(1, 3_000, 0, false), Consumer::new(), 0);
     assert_eq!((stats.gaps, stats.snapshots), (0, 0));
     assert_eq!(checked, 3_000);
     // With no snapshots, every duplicate is one the link sent twice.
@@ -238,7 +241,7 @@ fn duplicates_alone_need_no_snapshot() {
 
 #[test]
 fn a_late_joiner_catches_up() {
-    let (stats, checked) = lossy(2, random(2, 3_000, 0), Consumer::late_joiner(), 0);
+    let (stats, checked) = lossy(2, random(2, 3_000, 0, false), Consumer::late_joiner(), 0);
     assert_eq!((stats.gaps, stats.snapshots), (0, 1));
     assert!(checked > 2_990);
 }
