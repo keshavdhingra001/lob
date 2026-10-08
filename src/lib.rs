@@ -5,6 +5,7 @@
 pub mod book;
 pub mod command;
 pub mod consumer;
+pub mod engine;
 pub mod error;
 pub mod fast;
 pub mod feed;

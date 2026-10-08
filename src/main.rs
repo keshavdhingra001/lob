@@ -14,6 +14,8 @@
 //! lob itch <file[.gz]> [frame|decode|book|dump] [symbol]   replay a NASDAQ ITCH 5.0 day (D36–D39)
 //! lob itch <file[.gz]> top              the symbols with the most add orders
 //! lob itch <file[.gz]> journal <symbol> <journal>   one symbol's flow as engine commands (D54)
+//! lob engine <input> <journal> <snapshot> [every] [none|batch] [batch]   live engine, recovers on start (D77–D79)
+//! lob recover <journal> <snapshot> [ref|fast]   recover and print the digest (D79)
 //! ```
 
 use std::fs::{self, File};
@@ -21,13 +23,16 @@ use std::io::{self, BufRead, BufWriter, Write};
 use std::process::ExitCode;
 
 use lob::book::apply_all;
+use lob::engine::{Engine, Opened, Sync};
 use lob::gen::{GenConfig, Generator};
 use lob::journal::{read_journal, Journal, JournalWriter};
 use lob::latency::{measure_interleaved, median_run, table, Report};
 use lob::plot::{hgrm, parse_hgrm, svg};
+use lob::recovery::recover_files;
 use lob::replay::{replay, replay_timed};
 use lob::scenario::run_line;
-use lob::{Command, FastBook, OrderBook, RefBook};
+use lob::{BookConfig, Command, FastBook, OrderBook, RefBook};
+use std::time::{Duration, Instant};
 
 const HELP: &str = "\
 commands:
@@ -72,7 +77,16 @@ usage:
                                         symbol's messages
   lob itch <file[.gz]> top              the 10 symbols with the most add orders
   lob itch <file[.gz]> journal <symbol> <journal>   translate one symbol's flow into engine
-                                        commands (D54) and write them to a journal";
+                                        commands (D54) and write them to a journal
+  lob engine <input> <journal> <snapshot> [every] [none|batch] [batch]   run the engine live:
+                                        journal each batch (default 64 commands), fsync it
+                                        (batch, the default) or not (none), then apply it; snapshot
+                                        every <every> commands (default 100000, 0 = never). If the
+                                        journal exists it recovers first and skips the input
+                                        commands the journal already holds. Input: a journal or
+                                        text commands, one per line
+  lob recover <journal> <snapshot> [ref|fast]   recover from the snapshot (if usable) and the
+                                        journal, cut a torn tail, print stats and the digest";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -106,6 +120,18 @@ fn main() -> ExitCode {
         ["itch", path] => itch_replay(path, "book", "AAPL"),
         ["itch", path, mode] => itch_replay(path, mode, "AAPL"),
         ["itch", path, mode, symbol] => itch_replay(path, mode, symbol),
+        ["engine", input, journal, snap] => engine(input, journal, snap, "100000", "batch", "64"),
+        ["engine", input, journal, snap, every] => {
+            engine(input, journal, snap, every, "batch", "64")
+        }
+        ["engine", input, journal, snap, every, sync] => {
+            engine(input, journal, snap, every, sync, "64")
+        }
+        ["engine", input, journal, snap, every, sync, batch] => {
+            engine(input, journal, snap, every, sync, batch)
+        }
+        ["recover", journal, snap] => recover(journal, snap, "fast"),
+        ["recover", journal, snap, book] => recover(journal, snap, book),
         _ => Err(USAGE.to_string()),
     };
     match result {
@@ -181,11 +207,7 @@ fn replay_file(path: &str, events_path: Option<&str>) -> Result<(), String> {
         }
         assert_eq!(written, stats, "replay is deterministic");
     }
-    println!(
-        "commands {}  events {}  trades {}  rejects {}",
-        stats.commands, stats.events, stats.trades, stats.rejects
-    );
-    println!("digest   {:016x}", stats.digest);
+    print_stats(&stats);
     let secs = elapsed.as_secs_f64();
     println!(
         "time     {:.3} s  ({:.0} commands/s, reference book, includes encoding + hashing)",
@@ -193,6 +215,151 @@ fn replay_file(path: &str, events_path: Option<&str>) -> Result<(), String> {
         stats.commands as f64 / secs
     );
     Ok(())
+}
+
+/// Commands from a journal file, or from text, one per line (blank lines and `#` comments
+/// skipped).
+fn load_commands(path: &str) -> Result<Vec<Command>, String> {
+    let bytes = fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+    if bytes.starts_with(lob::journal::MAGIC) {
+        return Ok(read_journal(&bytes)
+            .map_err(|e| format!("{path}: {e}"))?
+            .commands);
+    }
+    let text = String::from_utf8(bytes).map_err(|_| format!("{path}: not UTF-8"))?;
+    text.lines()
+        .enumerate()
+        .map(|(n, l)| (n, l.trim()))
+        .filter(|(_, l)| !l.is_empty() && !l.starts_with('#'))
+        .map(|(n, l)| l.parse().map_err(|e| format!("{path}:{}: {e}", n + 1)))
+        .collect()
+}
+
+fn print_stats(stats: &lob::replay::ReplayStats) {
+    println!(
+        "commands {}  events {}  trades {}  rejects {}",
+        stats.commands, stats.events, stats.trades, stats.rejects
+    );
+    println!("digest   {:016x}", stats.digest);
+}
+
+fn print_opened(opened: &Opened) {
+    if let Some(e) = &opened.bad_snapshot {
+        eprintln!("warning: {e}; recovering from the start of the journal");
+    }
+    if opened.fresh {
+        println!("journal  new");
+    } else {
+        println!(
+            "recovered  {} snapshot, {} records replayed, {} torn bytes cut",
+            if opened.from_snapshot {
+                "from the"
+            } else {
+                "without a"
+            },
+            opened.replayed,
+            opened.truncated
+        );
+    }
+}
+
+/// The live engine (D77, D78). It stands in for a gateway with an input file: after a
+/// restart it skips the commands the journal already holds, as a client resending from
+/// its last acknowledged sequence number would.
+fn engine(
+    input: &str,
+    journal: &str,
+    snap: &str,
+    every: &str,
+    sync: &str,
+    batch: &str,
+) -> Result<(), String> {
+    let every = parse_arg("snapshot interval", every)?;
+    let batch: usize = parse_arg("batch size", batch)?;
+    if batch == 0 {
+        return Err("batch size must be positive".into());
+    }
+    let sync = match sync {
+        "none" => Sync::None,
+        "batch" => Sync::Batch,
+        _ => return Err(format!("bad sync mode `{sync}` (none|batch)")),
+    };
+    let commands = load_commands(input)?;
+    let started = Instant::now();
+    let (mut engine, opened) = Engine::<FastBook>::open(
+        journal.as_ref(),
+        snap.as_ref(),
+        BookConfig::default(),
+        sync,
+        every,
+        |_| {},
+    )
+    .map_err(|e| format!("{journal}: {e}"))?;
+    let recovery = started.elapsed();
+    print_opened(&opened);
+    let done = engine.stats().commands as usize;
+    let todo = commands.get(done..).unwrap_or_default();
+    let err = |e: io::Error| format!("{journal}: {e}");
+    let (mut snapshots, mut pause_max, mut pause_total) = (0u32, Duration::ZERO, Duration::ZERO);
+    let start = Instant::now();
+    for chunk in todo.chunks(batch) {
+        engine.process(chunk, |_| {}).map_err(err)?;
+        if engine.snapshot_due() {
+            let t = Instant::now();
+            engine.snapshot().map_err(err)?;
+            let pause = t.elapsed();
+            snapshots += 1;
+            pause_max = pause_max.max(pause);
+            pause_total += pause;
+        }
+    }
+    let secs = start.elapsed().as_secs_f64();
+    let syncs = engine.syncs;
+    let stats = engine.close().map_err(err)?;
+    print_stats(&stats);
+    println!(
+        "time     {secs:.3} s for {} new commands ({:.0}/s), recovery {:.3} s, {syncs} fsyncs",
+        todo.len(),
+        todo.len() as f64 / secs,
+        recovery.as_secs_f64()
+    );
+    if snapshots > 0 {
+        println!(
+            "snapshots {snapshots}, pause mean {:.2} ms, max {:.2} ms",
+            pause_total.as_secs_f64() * 1e3 / snapshots as f64,
+            pause_max.as_secs_f64() * 1e3
+        );
+    }
+    Ok(())
+}
+
+fn recover(journal: &str, snap: &str, book: &str) -> Result<(), String> {
+    fn run<B: OrderBook>(journal: &str, snap: &str) -> Result<(), String> {
+        let start = Instant::now();
+        let r = recover_files::<B>(
+            journal.as_ref(),
+            snap.as_ref(),
+            BookConfig::default(),
+            |_| {},
+        )
+        .map_err(|e| format!("{journal}: {e}"))?;
+        let secs = start.elapsed().as_secs_f64();
+        print_opened(&Opened {
+            fresh: false,
+            from_snapshot: r.recovered.from_snapshot,
+            replayed: r.recovered.replayed,
+            truncated: r.recovered.truncated,
+            bad_snapshot: r.bad_snapshot,
+        });
+        print_stats(&r.recovered.recorder.stats());
+        println!("time     {secs:.3} s");
+        Ok(())
+    }
+    match book {
+        "ref" => run::<RefBook>(journal, snap),
+        "fast" => run::<FastBook>(journal, snap),
+        _ => Err(format!("bad book `{book}` (ref|fast)")),
+    }
 }
 
 fn gen_queue(n: &str, path: &str) -> Result<(), String> {
