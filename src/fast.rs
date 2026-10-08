@@ -123,12 +123,9 @@ struct Reserve {
     hidden: u64,
 }
 
-/// A resting order's open quantity: what it shows, and an iceberg's reserve.
-type Open = (u64, Option<Reserve>);
-
 /// How an order resting `total` open shows it: all of it, or for an iceberg up to its
 /// peak with the rest hidden (D83).
-fn split(total: u64, peak: Option<Qty>) -> Open {
+fn split(total: u64, peak: Option<Qty>) -> (u64, Option<Reserve>) {
     match peak {
         None => (total, None),
         Some(Qty(peak)) => {
@@ -352,7 +349,11 @@ impl FastBook {
                 } else {
                     0
                 };
-                self.rest(id, side, price, split(remaining, peak), flags, stp);
+                let (shown, reserve) = split(remaining, peak);
+                let slot = self.rest(id, side, price, shown, flags, stp);
+                if let Some(reserve) = reserve {
+                    self.hide(slot, reserve);
+                }
             }
             _ => out.push(Event::Cancelled {
                 id,
@@ -362,16 +363,16 @@ impl FastBook {
     }
 
     /// Append an order showing `qty` to the back of its price level, creating the level if
-    /// needed. An iceberg's `reserve` goes in the side map (D87).
+    /// needed. Returns its slot, for `hide` if it's an iceberg.
     fn rest(
         &mut self,
         id: OrderId,
         side: Side,
         price: Price,
-        (qty, reserve): Open,
+        qty: u64,
         flags: u8,
         stp: Option<Stp>,
-    ) {
+    ) -> u32 {
         let level = match self.tree(side).get(price) {
             Some(l) => l,
             None => self.new_level(side, price),
@@ -385,7 +386,7 @@ impl FastBook {
             next: NIL,
             group: stp.map_or(0, |s| s.group.get()),
             action: stp.map_or(StpAction::CancelNewest, |s| s.action),
-            flags: flags | if reserve.is_some() { ICEBERG } else { 0 },
+            flags,
         });
         if tail == NIL {
             self.levels[level].head = slot;
@@ -397,10 +398,16 @@ impl FastBook {
         lv.total += qty;
         lv.count += 1;
         self.index.insert(id, slot);
-        if let Some(reserve) = reserve {
-            self.level_hidden[level as usize] += reserve.hidden;
-            self.icebergs.insert(id, reserve);
-        }
+        slot
+    }
+
+    /// Make the order resting in `slot` an iceberg with `reserve` (D87). Kept out of `rest`,
+    /// so ordinary orders don't carry a reserve through it.
+    fn hide(&mut self, slot: u32, reserve: Reserve) {
+        let node = &mut self.orders[slot];
+        node.flags |= ICEBERG;
+        self.level_hidden[node.level as usize] += reserve.hidden;
+        self.icebergs.insert(node.id, reserve);
     }
 
     fn new_level(&mut self, side: Side, price: Price) -> u32 {
@@ -413,10 +420,10 @@ impl FastBook {
             count: 0,
         });
         self.tree_mut(side).insert(price, level);
-        // The slab reuses a freed index or appends one, so this stays in step with it.
-        match self.level_hidden.get_mut(level as usize) {
-            Some(hidden) => *hidden = 0,
-            None => self.level_hidden.push(0),
+        // The slab reuses a freed index or appends one; this grows with it. A reused index
+        // already holds 0: a level leaves only once every order (and its hidden part) has.
+        if level as usize == self.level_hidden.len() {
+            self.level_hidden.push(0);
         }
         // A new level becomes the best if it beats the current best. (Prices in the ladder
         // are unique, so it's never equal.)
@@ -445,13 +452,14 @@ impl FastBook {
     /// empties. Returns the node and, for an iceberg, what it kept hidden.
     fn unlink(&mut self, slot: u32) -> (Node, Option<Reserve>) {
         let node = self.orders[slot];
-        let reserve = node.iceberg().then(|| {
-            self.icebergs
+        let mut reserve = None;
+        if node.iceberg() {
+            let r = self
+                .icebergs
                 .remove(&node.id)
-                .expect("an iceberg has a reserve")
-        });
-        if let Some(r) = reserve {
+                .expect("an iceberg has a reserve");
             self.level_hidden[node.level as usize] -= r.hidden;
+            reserve = Some(r);
         }
         if node.prev == NIL {
             self.levels[node.level].head = node.next;
@@ -628,8 +636,11 @@ impl FastBook {
         let stp = node.stp();
         let remaining = self.take(id, lv.side, qty.0, Some(price), stp, out);
         if remaining > 0 {
-            let open = split(remaining, reserve.map(|r| Qty(r.peak)));
-            self.rest(id, lv.side, price, open, node.flags & POST_ONLY, stp);
+            let (shown, reserve) = split(remaining, reserve.map(|r| Qty(r.peak)));
+            let slot = self.rest(id, lv.side, price, shown, node.flags & POST_ONLY, stp);
+            if let Some(reserve) = reserve {
+                self.hide(slot, reserve);
+            }
         }
     }
 }
@@ -829,7 +840,10 @@ impl OrderBook for FastBook {
                 peak: peak.0,
                 hidden: o.hidden.0,
             });
-            book.rest(o.id, o.side, o.price, (o.qty.0, reserve), flags, o.stp);
+            let slot = book.rest(o.id, o.side, o.price, o.qty.0, flags, o.stp);
+            if let Some(reserve) = reserve {
+                book.hide(slot, reserve);
+            }
         }
         Ok(book)
     }
