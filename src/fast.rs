@@ -693,6 +693,29 @@ mod tests {
     }
 
     #[test]
+    fn extreme_prices_match_the_reference_book() {
+        // The ladder's window offset once overflowed `i64` here (found by M14's snapshot
+        // property): a window centred near 0, then a price near `i64::MIN`.
+        let lines = [
+            "limit 1 buy 5 100",
+            "limit 2 buy 5 -9223372036854775808",
+            "limit 3 sell 5 9223372036854775807",
+            "limit 4 sell 2 -9223372036854775808",
+            "modify 2 3 9223372036854775806",
+            "market 5 sell 20",
+            "limit 6 sell 1 -9223372036854775807",
+            "market 7 buy 20",
+        ];
+        let mut reference = crate::RefBook::new();
+        let mut want = Vec::new();
+        for line in lines {
+            reference.apply(&line.parse().unwrap(), &mut want);
+        }
+        let want: Vec<String> = want.iter().map(|e| e.to_string()).collect();
+        assert_eq!(run(&mut FastBook::new(), &lines), want);
+    }
+
+    #[test]
     fn slots_and_levels_are_reused() {
         let mut book = FastBook::new();
         for round in 0..100u64 {

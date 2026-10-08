@@ -174,13 +174,19 @@ impl Ladder {
         price.0.div_euclid(self.tick)
     }
 
+    /// How many ticks `price` is above the window's first slot. In `i128`: with prices
+    /// anywhere in `i64`, the difference can need 65 bits.
+    fn offset(&self, price: Price) -> i128 {
+        i128::from(self.ticks(price)) - i128::from(self.base)
+    }
+
     /// The window slot for `price`, if the window exists and covers it.
     fn slot(&self, price: Price) -> Option<usize> {
         if self.slots.is_empty() {
             return None;
         }
-        let i = self.ticks(price) - self.base;
-        (0..WINDOW as i64).contains(&i).then_some(i as usize)
+        let i = self.offset(price);
+        (0..WINDOW as i128).contains(&i).then_some(i as usize)
     }
 
     fn price_at(&self, i: usize) -> Price {
@@ -198,7 +204,7 @@ impl Ladder {
     pub fn insert(&mut self, price: Price, level: u32) {
         if self.slots.is_empty() {
             // One-time allocation, centred on the first price this side ever sees.
-            self.base = self.ticks(price) - (WINDOW / 2) as i64;
+            self.base = self.ticks(price).saturating_sub((WINDOW / 2) as i64);
             self.slots = vec![EMPTY; WINDOW];
             self.occupancy = Some(Occupancy::new());
         }
@@ -242,8 +248,8 @@ impl Ladder {
         let from_window = self.occupancy.as_ref().and_then(|occ| {
             let top = match below {
                 // Slot index of the highest price strictly below `p`, clamped to the window.
-                Some(p) => (self.ticks(p) - self.base - 1).min(WINDOW as i64 - 1),
-                None => WINDOW as i64 - 1,
+                Some(p) => (self.offset(p) - 1).min(WINDOW as i128 - 1),
+                None => WINDOW as i128 - 1,
             };
             let top = usize::try_from(top).ok()?;
             occ.highest_at_or_below(top)
@@ -264,7 +270,7 @@ impl Ladder {
         .map(|(&p, &l)| (p, l));
         let from_window = self.occupancy.as_ref().and_then(|occ| {
             let bottom = match above {
-                Some(p) => (self.ticks(p) - self.base + 1).max(0),
+                Some(p) => (self.offset(p) + 1).max(0),
                 None => 0,
             };
             let bottom = usize::try_from(bottom).ok().filter(|&b| b < WINDOW)?;
