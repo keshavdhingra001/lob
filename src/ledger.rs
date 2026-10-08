@@ -99,18 +99,14 @@ impl Ledger {
     ) -> Result<(), String> {
         match *event {
             Event::Accepted { id } => {
-                let qty = match *cmd {
-                    Command::Limit { id: c, qty, .. } | Command::Market { id: c, qty, .. }
-                        if c == id =>
-                    {
-                        qty
-                    }
-                    _ => return Err(format!("`accepted {id}` doesn't match the command")),
-                };
-                if self.open.insert(id, qty.0).is_some() {
+                let order = cmd
+                    .new_order()
+                    .filter(|o| o.id == id)
+                    .ok_or_else(|| format!("`accepted {id}` doesn't match the command"))?;
+                if self.open.insert(id, order.qty.0).is_some() {
                     return Err(format!("order {id} accepted while already open"));
                 }
-                if let Some(stp) = cmd.new_order().and_then(|o| o.stp) {
+                if let Some(stp) = order.stp {
                     self.stp.insert(id, stp);
                 }
             }
@@ -142,9 +138,7 @@ impl Ledger {
                 if limit.is_some_and(|limit| !taker_side.crosses(limit, price)) {
                     return Err(format!("trade through the taker's limit: {event}"));
                 }
-                if Stp::conflict(self.stp.get(&taker).copied(), self.stp.get(&maker).copied())
-                    .is_some()
-                {
+                if self.conflict(taker, maker).is_some() {
                     return Err(format!("self-trade: {event}"));
                 }
                 for id in [taker, maker] {
@@ -160,9 +154,9 @@ impl Ledger {
             Event::SelfTradeCancelled { id, remaining } => {
                 // The taker's action decides who may be cancelled (D68, D69).
                 let taker = cmd.id();
-                let action =
-                    Stp::conflict(self.stp.get(&taker).copied(), self.stp.get(&id).copied())
-                        .ok_or_else(|| format!("{event}: not in the taker's STP group"))?;
+                let action = self
+                    .conflict(taker, id)
+                    .ok_or_else(|| format!("{event}: not in the taker's STP group"))?;
                 let allowed = if id == taker {
                     action != StpAction::CancelOldest
                 } else {
@@ -176,6 +170,11 @@ impl Ledger {
             Event::Cancelled { id, remaining } => self.close(id, remaining)?,
         }
         Ok(())
+    }
+
+    /// The taker's STP action if `taker` and `maker` are live in one group.
+    fn conflict(&self, taker: OrderId, maker: OrderId) -> Option<StpAction> {
+        Stp::conflict(self.stp.get(&taker).copied(), self.stp.get(&maker).copied())
     }
 
     /// An order is done with `remaining` unfilled, which must be all it had open.

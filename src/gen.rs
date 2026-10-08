@@ -102,17 +102,7 @@ impl Generator {
     }
 
     fn stp(&mut self) -> Option<Stp> {
-        if self.stp_groups == 0 {
-            return None;
-        }
-        let group = NonZeroU16::new(self.rng.below(self.stp_groups as u64 + 1) as u16)?;
-        const ACTIONS: [StpAction; 3] = [
-            StpAction::CancelNewest,
-            StpAction::CancelOldest,
-            StpAction::CancelBoth,
-        ];
-        let action = ACTIONS[self.rng.below(3) as usize];
-        Some(Stp { group, action })
+        random_stp(&mut self.rng, self.stp_groups)
     }
 
     /// Mostly small round lots, occasionally a large one.
@@ -202,6 +192,22 @@ impl Generator {
             price: Price(order.price),
         }
     }
+}
+
+/// A group in `1..=groups` with a random action, or none, with equal odds. When `groups`
+/// is 0 it's always none and draws no number, so an ungrouped flow is what it always was.
+pub fn random_stp(rng: &mut Rng, groups: u16) -> Option<Stp> {
+    if groups == 0 {
+        return None;
+    }
+    let group = NonZeroU16::new(rng.below(groups as u64 + 1) as u16)?;
+    const ACTIONS: [StpAction; 3] = [
+        StpAction::CancelNewest,
+        StpAction::CancelOldest,
+        StpAction::CancelBoth,
+    ];
+    let action = ACTIONS[rng.below(3) as usize];
+    Some(Stp { group, action })
 }
 
 const LOTS_FOR_MODIFY: [u64; 4] = [1, 10, 20, 50];

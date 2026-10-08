@@ -494,9 +494,10 @@ impl FastBook {
         self.index.remove(&id);
         self.unlink(slot);
         out.push(Event::Modified { id, qty, price });
-        let remaining = self.take(id, lv.side, qty.0, Some(price), node.stp(), out);
+        let stp = node.stp();
+        let remaining = self.take(id, lv.side, qty.0, Some(price), stp, out);
         if remaining > 0 {
-            self.rest(id, lv.side, price, remaining, node.post_only, node.stp());
+            self.rest(id, lv.side, price, remaining, node.post_only, stp);
         }
     }
 }

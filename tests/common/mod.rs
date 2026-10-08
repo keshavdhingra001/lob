@@ -1,11 +1,10 @@
 //! Shared by the integration tests.
 #![allow(dead_code)]
 
-use std::num::NonZeroU16;
-
 use lob::command::TimeInForce;
+use lob::gen::random_stp;
 use lob::rng::Rng;
-use lob::{Command, OrderId, Price, Qty, Side, Stp, StpAction};
+use lob::{Command, OrderId, Price, Qty, Side};
 
 /// Mostly a fresh id, sometimes an old one (to hit id-not-increasing rejects).
 pub fn new_order_id(rng: &mut Rng, next_id: &mut u64) -> OrderId {
@@ -15,21 +14,6 @@ pub fn new_order_id(rng: &mut Rng, next_id: &mut u64) -> OrderId {
         *next_id += 1;
         OrderId(*next_id - 1)
     }
-}
-
-/// A group in `1..=groups`, or none, with equal odds; never one when `groups` is 0, and
-/// then no random number is drawn, so ungrouped flows stay what they were.
-pub fn random_stp(rng: &mut Rng, groups: u16) -> Option<Stp> {
-    if groups == 0 {
-        return None;
-    }
-    let group = NonZeroU16::new(rng.below(groups as u64 + 1) as u16)?;
-    let action = match rng.below(3) {
-        0 => StpAction::CancelNewest,
-        1 => StpAction::CancelOldest,
-        _ => StpAction::CancelBoth,
-    };
-    Some(Stp { group, action })
 }
 
 /// Edge-case flow: narrow prices, small quantities, some zero, oversized (max 12) and

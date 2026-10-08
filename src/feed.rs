@@ -178,24 +178,15 @@ impl Publisher {
     fn on_event(&mut self, cmd: &Command, event: &Event, out: &mut Vec<Msg>) -> Result<(), String> {
         match *event {
             Event::Accepted { id } => {
-                let (side, price, qty) = match *cmd {
-                    Command::Limit {
-                        id: c,
-                        side,
-                        price,
-                        qty,
-                        ..
-                    } if c == id => (side, Some(price), qty),
-                    Command::Market {
-                        id: c, side, qty, ..
-                    } if c == id => (side, None, qty),
-                    _ => return Err("doesn't match the command".into()),
-                };
+                let order = cmd
+                    .new_order()
+                    .filter(|o| o.id == id)
+                    .ok_or("doesn't match the command")?;
                 self.start_taker(Taker {
                     id,
-                    side,
-                    price,
-                    open: qty.0,
+                    side: order.side,
+                    price: order.limit,
+                    open: order.qty.0,
                 })?;
             }
             Event::Rejected { .. } => {}
