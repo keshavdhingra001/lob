@@ -1,8 +1,15 @@
 # lob
 
-A limit order book and matching engine in Rust, written from scratch: price-time priority matching, deterministic replay,
-a lock-free three-thread pipeline, an L2 market data feed, and a real NASDAQ trading day as test input. Two book implementations,
-a simple one and a fast one, must produce the same events for every command, and every performance claim cites a measurement.
+A limit order book and matching engine in Rust, built from scratch as a study of how exchanges match orders and how to make that
+fast, deterministic and provably correct. It has price-time priority matching with the order types real venues offer (IOC, FOK,
+post-only, self-trade prevention, icebergs), deterministic replay, crash recovery, a lock-free three-thread pipeline and an L2 market
+data feed, and it uses a real NASDAQ trading day as test input. Two book implementations, a simple one and a fast one, must produce the
+same events for every command, and every performance claim cites a measurement.
+
+**Status:** active. Milestones M0–M15 are built (below); the next stage puts the engine on a network: a binary order-entry protocol over
+TCP, wire-to-wire latency, multicast market data. Design decisions are logged as they're made in [DESIGN.md](DESIGN.md) (D1–D89).
+
+## Results
 
 | On one laptop core (i7-1165G7) | Fast book | Reference book |
 |---|---|---|
@@ -25,6 +32,22 @@ and iceberg orders (M15), which cost the fast book about 4% and 3.5% on flow tha
 Up to p99.9 the fast book is about 2x lower. Past p99.99 the books meet, and so does the grey line, an empty timed window:
 that part of the tail is the machine (interrupts, preemption), not the code. [More plots](BENCHMARKS.md#latency-percentile-plots-m12-d60).
 
+## What it does
+
+- **Orders:** limit and market orders; `modify` (cancel/replace with exchange priority rules: a reduction at the same price keeps its place,
+  anything else goes to the back) and `cancel`. Time in force: GTC, IOC, FOK (all or nothing, checked before any fill), post-only.
+- **Matching:** price-time priority, every trade at the resting order's price, integer prices in ticks, tick-size and max-quantity checks.
+  Order ids must increase per session, which lets the engine drop a per-id history (D30).
+- **Self-trade prevention:** an order can carry an STP group and an action: cancel newest, oldest or both. Two orders of one group never trade (D67–D73).
+- **Iceberg orders:** `peak=<n>` shows n at a time. Each new slice goes to the back of its level, and one taker can take several slices.
+  FOK counts the hidden quantity, market data shows only the slices (D83–D89).
+- **Deterministic replay:** a checksummed binary command journal, and a sequence-numbered event stream whose 64-bit digest is the same on every run and machine.
+- **Crash recovery:** `lob engine` journals each batch, fsyncs it once (group commit) and only then applies it, so no event is sent for a
+  command a crash could lose. Atomic snapshots of the logical book plus the journal after them give the same digest as a run that never stopped (D74–D82).
+- **Market data:** L2 level updates coalesced per command, with sequence numbers, heartbeats and snapshots; a consumer detects gaps and recovers (D40–D44).
+- **Real data:** a NASDAQ TotalView-ITCH 5.0 parser that rebuilds every symbol's book for a whole day, and a translator that runs one symbol's
+  real order flow through this engine (D35–D39, D54).
+
 ## Architecture
 
 ```
@@ -35,19 +58,13 @@ that part of the tail is the machine (interrupts, preemption), not the code. [Mo
 ```
 
 - **The engine is one call:** `apply(&Command, &mut Vec<Event>)`. It never reads a clock, never uses randomness and never iterates a hash map,
-  so the same commands always give byte-identical events (checked by a pinned 64-bit digest).
-- **The fast book:** a slab of orders with an intrusive doubly linked list per price level (O(1) cancel), a tick-indexed price ladder
-  with a two-level bitmap to find the best price, a cheap hasher for the id index, and no allocation once warm.
+  so the same commands always give byte-identical events (checked by pinned digests).
+- **The reference book** is a `BTreeMap` of `VecDeque`s, written to be obviously correct. It's the oracle for everything else.
+- **The fast book:** a slab of 32-byte orders with an intrusive doubly linked list per price level (O(1) cancel), a tick-indexed price ladder
+  with a two-level bitmap to find the best price, a cheap hasher for the id index, and no heap allocation once warm. Rarely used order
+  attributes (an iceberg's hidden quantity) live in side tables, so the common case keeps two orders per cache line.
 - **The pipeline:** a hand-written bounded SPSC ring (cache-line-padded indices, `Acquire`/`Release`). Its output equals one thread's byte for byte.
   At full load three threads are *slower* than one: the output stage dominates, and the hand-offs between cores cost more than they save.
-- **Market data:** level updates coalesced per command, with sequence numbers, heartbeats and snapshots. A consumer detects gaps and recovers.
-- **Self-trade prevention:** an order can carry an STP group and an action (cancel newest, oldest or both). Two orders of one group never trade;
-  FOK stays exact with it, and the fast book's order still fits in 32 bytes (D67–D73).
-- **Iceberg orders:** `peak=<n>` shows n at a time; each new slice goes to the back of its level, and one taker can take several slices.
-  FOK counts hidden quantity (with an STP subtlety, D86), market data shows slices only, and the fast book's order still fits in 32 bytes (D83–D89).
-- **Crash recovery:** `lob engine` journals each batch, fsyncs it once (group commit), and only then applies it, so no event is ever sent
-  for a command a crash could lose. It writes atomic snapshots of the logical book. After a crash, the snapshot plus the journal after it
-  give the same digest as a run that never stopped. That's checked at every cut point of the journal, and against the real binary killed with SIGKILL (D74–D82).
 
 ## How correctness is checked
 
@@ -63,9 +80,12 @@ that part of the tail is the machine (interrupts, preemption), not the code. [Mo
   and a differential target runs any bytes as a session on both books with the ledger watching (D89).
 - **Miri** on the lock-free ring: no undefined behaviour or data races. Weakening any of its six `Acquire`/`Release` operations to `Relaxed`
   is caught, which no test on x86 hardware can do (D64).
-- **Mutation checks:** every milestone plants bugs on purpose and confirms a test catches each one.
+- **Mutation checks:** every milestone plants bugs on purpose (72 for icebergs alone) and confirms a test catches each one; the survivors are
+  written up, and each either gets a test or is shown to be harmless.
 
 ## Try it
+
+Needs stable Rust (built with 1.99). Nightly is only for fuzzing (`cargo +nightly fuzz`) and Miri.
 
 ```bash
 cargo test
@@ -139,6 +159,23 @@ Measure it yourself (about 15 minutes, needs a quiet machine; the ITCH parts nee
 scripts/report.sh
 ```
 
+## The `lob` command
+
+| Command | What it does |
+|---|---|
+| `lob` | Interactive REPL on the reference book (`help` lists the commands) |
+| `lob gen <seed> <n> <journal> [max-live] [stp-groups] [iceberg-pct]` | Write seeded synthetic order flow to a journal |
+| `lob replay <journal> [events-file]` | Replay a journal: stats and digest |
+| `lob bench <journal>` | Both books on the same journal: speed and matching digests |
+| `lob latency <journal> [runs] [dir]` | Per-command latency percentiles for both books |
+| `lob engine <input> <journal> <snapshot> ...` | Run the engine live with group commit and snapshots; recovers first if the journal exists |
+| `lob recover <journal> <snapshot> [ref\|fast]` | Recover after a crash: snapshot plus journal tail, digests of events and book |
+| `lob feed <journal> [drop-percent] [seed]` | Publish the L2 feed, with a consumer recovering over a lossy link |
+| `lob pipeline <journal> [rate] [ring\|mpsc] [capacity]` | The three-thread pipeline against one thread |
+| `lob itch <file[.gz]> [frame\|decode\|book\|dump\|top\|journal ...]` | Replay a NASDAQ ITCH 5.0 file |
+
+`lob --help` prints every option.
+
 ## Code layout
 
 | | |
@@ -154,30 +191,42 @@ scripts/report.sh
 | [`itch.rs`](src/itch.rs), [`itch_book.rs`](src/itch_book.rs), [`itch_flow.rs`](src/itch_flow.rs) | NASDAQ ITCH 5.0 parser, book rebuild, translation into engine commands |
 | [`latency.rs`](src/latency.rs), [`plot.rs`](src/plot.rs), [`benches/`](benches/), [`scripts/`](scripts/) | Measurement harness, percentile plots, criterion, the report script |
 | [`main.rs`](src/main.rs) | The `lob` CLI: REPL, `gen`, `replay`, `bench`, `latency`, `plot`, `feed`, `pipeline`, `itch`, `engine`, `recover` |
+| [`tests/`](tests/), [`fuzz/`](fuzz/) | Scenario scripts, differential and property tests, crash tests, fuzz targets |
 
-## Not built
+## Not built (yet)
 
-No network gateway (input is a journal file, so every latency is in-process), one symbol, no auctions, no hidden or iceberg orders,
-no risk checks beyond a fat-finger quantity limit, no replica to fail over to.
-[DESIGN.md](DESIGN.md#not-built-d61) says where each would go.
+No network gateway (input is a journal file, so every latency is in-process), one symbol, no auctions, no fully hidden, pegged or stop orders,
+no risk checks beyond a fat-finger quantity limit, no replica to fail over to. [DESIGN.md](DESIGN.md#not-built-d61) says where each would go.
 
-## Build history
+## Roadmap
 
-- [x] **M0** Scaffold: command/event model, text format, `OrderBook` trait, REPL
-- [x] **M1** Reference book: price-time priority, limit / market / cancel, scenario tests, invariant checker
-- [x] **M2** Order lifecycle: modify, IOC / FOK / post-only, tick and max-quantity rules, a conservation ledger
-- [x] **M3** Deterministic replay: binary journal, sequenced events, golden digest, order-flow generator
-- [x] **M4** Fast book: slab, intrusive lists, O(1) cancel; identical events to M1 over 15M commands
-- [x] **M5** Latency measurement: per-command histograms, criterion, `perf`
-- [x] **M6** Zero allocations per command, tick-indexed price ladder, cache-line layout
-- [x] **M7** Real market data: NASDAQ ITCH 5.0 parser, every symbol's book rebuilt from a sample day
-- [x] **M8** Market data out: L2 snapshots, incremental updates with sequence numbers, gap recovery
-- [x] **M9** Engine pipeline: gateway -> lock-free SPSC ring -> matching -> output ring
-- [x] **M10** Property tests (proptest): codecs, journal damage, engine and feed
-- [x] **M11** Benchmark report: one script, real ITCH flow through both books, BENCHMARKS.md
-- [x] **M12** Final write-up: DESIGN overview and index, percentile plots, this README
-- [x] **M13** Self-trade prevention: STP groups, three actions, FOK and modify rules, journal v2
-- [x] **M14** Crash recovery: logical-book snapshots, group commit, recovery proved by digest at every crash point
-- [x] **M15** Iceberg orders: slices refilled at the back of the queue, FOK and STP rules, snapshot v3, journal v3
+Built, each with its decisions in [DESIGN.md](DESIGN.md):
 
-Each milestone's decisions are in [DESIGN.md](DESIGN.md), numbered D1–D89.
+- [x] **M0–M4** Core: command/event model, the reference book, order lifecycle (modify, IOC / FOK / post-only), deterministic replay
+  with a golden digest, the fast book (identical events over 15M commands)
+- [x] **M5–M6** Measurement and speed: latency histograms, criterion, `perf`; zero allocations per command, tick-indexed price ladder, cache-line layout
+- [x] **M7–M9** Real data and plumbing: NASDAQ ITCH 5.0 day rebuilt, L2 feed with gap recovery, lock-free three-thread pipeline
+- [x] **M10–M12** Proof and write-up: property tests, a reproducible benchmark report, percentile plots, Miri and fuzzing
+- [x] **M13** Self-trade prevention
+- [x] **M14** Crash recovery: snapshots, group commit, recovery proved at every crash point and against SIGKILL
+- [x] **M15** Iceberg orders
+
+Planned next (each starts with its own design review):
+
+- [ ] **M16** Binary order-entry protocol (OUCH-like) over TCP, with sessions, sequence numbers and client order tokens
+- [ ] **M17** Wire-to-wire latency: socket in to socket out, tuned one change at a time
+- [ ] **M18** Market data over UDP multicast, with a TCP retransmit channel
+- [ ] **M19** Tick-to-trade: a small market-making client that reads the feed and sends orders
+- [ ] **M20** Pre-trade risk checks, and many symbols sharded across matching threads
+- [ ] **M21** Deterministic simulation testing: simulated network and disk with seeded faults
+
+Limits that will apply to the network numbers: one laptop, loopback only, no kernel bypass, no hardware timestamps.
+
+## Documents
+
+- [DESIGN.md](DESIGN.md): every decision (what, alternatives, why), with dated results for each milestone.
+- [BENCHMARKS.md](BENCHMARKS.md): method, machine and every measured table, tied to raw output in [`bench/results/`](bench/results/).
+
+## License
+
+MIT (declared in `Cargo.toml`).
