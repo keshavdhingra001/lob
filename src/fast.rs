@@ -609,10 +609,15 @@ impl FastBook {
         }
         let node = self.orders[slot];
         let lv = self.levels[node.level];
-        if price == lv.price && qty.0 <= self.open(slot) {
+        let open = self.open(slot);
+        if price == lv.price && qty.0 <= open {
             // An iceberg loses hidden quantity first, then shown (D88).
-            let mut cut = self.open(slot) - qty.0;
-            if let Some(reserve) = self.icebergs.get_mut(&id) {
+            let mut cut = open - qty.0;
+            if node.iceberg() {
+                let reserve = self
+                    .icebergs
+                    .get_mut(&id)
+                    .expect("an iceberg has a reserve");
                 let from_hidden = cut.min(reserve.hidden);
                 reserve.hidden -= from_hidden;
                 self.level_hidden[node.level as usize] -= from_hidden;
