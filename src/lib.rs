@@ -19,6 +19,7 @@ pub mod latency;
 pub mod ledger;
 pub mod pipeline;
 pub mod plot;
+pub mod recovery;
 pub mod reference;
 pub mod replay;
 pub mod ring;

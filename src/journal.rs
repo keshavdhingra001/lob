@@ -42,6 +42,9 @@ pub enum JournalError {
     #[error("corrupt record at offset {0}")]
     Corrupt(u64),
     /// The checksum passed but the payload doesn't decode: a bug or a format mismatch.
+    /// A start offset inside the header or past the end of the file.
+    #[error("offset {0} is outside the journal's records")]
+    OffsetOutOfRange(u64),
     #[error("invalid record at offset {offset}: {reason}")]
     InvalidRecord { offset: u64, reason: &'static str },
 }
@@ -58,6 +61,8 @@ pub struct Journal {
 pub struct JournalWriter<W: Write> {
     out: W,
     buf: Vec<u8>,
+    /// Bytes in the file so far, header included: where the next record starts.
+    len: u64,
 }
 
 impl<W: Write> JournalWriter<W> {
@@ -68,7 +73,32 @@ impl<W: Write> JournalWriter<W> {
         Ok(JournalWriter {
             out,
             buf: Vec::with_capacity(64),
+            len: HEADER_LEN as u64,
         })
+    }
+
+    /// Append to a journal that already holds `len` valid bytes, header included. `out`
+    /// must be positioned at `len` (after a recovery truncated any torn tail, D79).
+    pub fn resume(out: W, len: u64) -> Self {
+        JournalWriter {
+            out,
+            buf: Vec::with_capacity(64),
+            len,
+        }
+    }
+
+    /// Where the next record will start.
+    pub fn position(&self) -> u64 {
+        self.len
+    }
+
+    /// Flush buffered records to `out`, keeping the writer.
+    pub fn flush(&mut self) -> io::Result<()> {
+        self.out.flush()
+    }
+
+    pub fn get_ref(&self) -> &W {
+        &self.out
     }
 
     pub fn append(&mut self, cmd: &Command) -> io::Result<()> {
@@ -82,6 +112,7 @@ impl<W: Write> JournalWriter<W> {
         self.buf.extend_from_slice(&crc.finalize().to_le_bytes());
         self.buf.extend_from_slice(&len_bytes);
         self.buf.extend_from_slice(&payload[..len]);
+        self.len += self.buf.len() as u64;
         self.out.write_all(&self.buf)
     }
 
@@ -170,6 +201,13 @@ pub fn decode_command(payload: &[u8]) -> Result<Command, &'static str> {
 /// Decode a whole journal. A torn last record is reported in `torn_tail`, not an error;
 /// damage anywhere before the last record is an error (D16).
 pub fn read_journal(bytes: &[u8]) -> Result<Journal, JournalError> {
+    read_journal_from(bytes, HEADER_LEN as u64)
+}
+
+/// `read_journal`, decoding only the records from byte `offset` on: where a snapshot
+/// says its records end (D75). The header is still checked. `offset` must be a record
+/// boundary; anything else almost surely fails a checksum and reads as damage.
+pub fn read_journal_from(bytes: &[u8], offset: u64) -> Result<Journal, JournalError> {
     if bytes.len() < HEADER_LEN || &bytes[..4] != MAGIC {
         return Err(JournalError::BadMagic);
     }
@@ -177,8 +215,11 @@ pub fn read_journal(bytes: &[u8]) -> Result<Journal, JournalError> {
     if !(1..=VERSION).contains(&version) {
         return Err(JournalError::UnsupportedVersion(version));
     }
+    if offset < HEADER_LEN as u64 || offset > bytes.len() as u64 {
+        return Err(JournalError::OffsetOutOfRange(offset));
+    }
     let mut commands = Vec::new();
-    let mut pos = HEADER_LEN;
+    let mut pos = offset as usize;
     while pos < bytes.len() {
         let rest = &bytes[pos..];
         let torn = Journal {

@@ -40,8 +40,14 @@ impl Fnv64 {
         }
     }
 
+    /// The hash so far. FNV's state *is* its output, so this is also where to resume.
     pub fn finish(self) -> u64 {
         self.0
+    }
+
+    /// Carry on hashing from an earlier `finish()` (D75).
+    pub fn resume(state: u64) -> Self {
+        Fnv64(state)
     }
 }
 
@@ -116,6 +122,80 @@ pub struct ReplayStats {
     pub digest: u64,
 }
 
+/// The output side of a replay in progress: counters and digest of every event so far.
+/// It can start from a snapshot's counters (D75), so a recovered session's digest equals
+/// the uninterrupted one's. The book is passed in, so any book (or `&mut` one) works.
+pub struct Recorder {
+    stats: ReplayStats,
+    hash: Fnv64,
+    events: Vec<Event>,
+    buf: Vec<u8>,
+}
+
+impl Default for Recorder {
+    fn default() -> Self {
+        Recorder {
+            stats: ReplayStats::default(),
+            hash: Fnv64::default(),
+            events: Vec::with_capacity(64),
+            buf: Vec::with_capacity(4096),
+        }
+    }
+}
+
+impl Recorder {
+    /// Continue after `stats`: event numbers and the digest pick up where they stopped.
+    pub fn resume(stats: ReplayStats) -> Self {
+        Recorder {
+            stats,
+            hash: Fnv64::resume(stats.digest),
+            ..Recorder::default()
+        }
+    }
+
+    /// Apply one command to `book`. Encoded events go to `sink` in chunks.
+    pub fn apply<B: OrderBook>(
+        &mut self,
+        book: &mut B,
+        cmd: &Command,
+        sink: &mut impl FnMut(&[u8]),
+    ) {
+        self.events.clear();
+        book.apply(cmd, &mut self.events);
+        for event in &self.events {
+            self.stats.events += 1;
+            match event {
+                Event::Trade { .. } => self.stats.trades += 1,
+                Event::Rejected { .. } => self.stats.rejects += 1,
+                _ => {}
+            }
+            encode_event(self.stats.events, event, &mut self.buf);
+        }
+        self.stats.commands += 1;
+        // Flush in chunks: one sink call per command would dominate the profile.
+        if self.buf.len() >= 4000 {
+            self.flush(sink);
+        }
+    }
+
+    /// Hand any buffered event bytes to `sink`.
+    pub fn flush(&mut self, sink: &mut impl FnMut(&[u8])) {
+        self.hash.update(&self.buf);
+        sink(&self.buf);
+        self.buf.clear();
+    }
+
+    /// Counters and digest of every event so far, including any not yet flushed.
+    pub fn stats(&self) -> ReplayStats {
+        let mut hash = self.hash;
+        hash.update(&self.buf);
+        ReplayStats {
+            digest: hash.finish(),
+            ..self.stats
+        }
+    }
+}
+
 /// Run `commands` through `book`. Each chunk of encoded events is passed to `sink`
 /// (to write it to a file, or ignore it); the digest covers exactly those bytes.
 pub fn replay<B: OrderBook>(
@@ -123,34 +203,12 @@ pub fn replay<B: OrderBook>(
     commands: &[Command],
     mut sink: impl FnMut(&[u8]),
 ) -> ReplayStats {
-    let mut stats = ReplayStats::default();
-    let mut hash = Fnv64::default();
-    let mut events = Vec::with_capacity(64);
-    let mut buf = Vec::with_capacity(4096);
+    let mut rec = Recorder::default();
     for cmd in commands {
-        events.clear();
-        book.apply(cmd, &mut events);
-        for event in &events {
-            stats.events += 1;
-            match event {
-                Event::Trade { .. } => stats.trades += 1,
-                Event::Rejected { .. } => stats.rejects += 1,
-                _ => {}
-            }
-            encode_event(stats.events, event, &mut buf);
-        }
-        stats.commands += 1;
-        // Flush in chunks: one sink call per command would dominate the profile.
-        if buf.len() >= 4000 {
-            hash.update(&buf);
-            sink(&buf);
-            buf.clear();
-        }
+        rec.apply(book, cmd, &mut sink);
     }
-    hash.update(&buf);
-    sink(&buf);
-    stats.digest = hash.finish();
-    stats
+    rec.flush(&mut sink);
+    rec.stats()
 }
 
 /// `replay`, timed, without keeping the event bytes. For the CLI's throughput line;
