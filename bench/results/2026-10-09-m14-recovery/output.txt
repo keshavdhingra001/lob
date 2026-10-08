@@ -1,0 +1,81 @@
+# machine: Linux 7.2.5-3-omarchy x86_64, 8 cpus, Model name: 11th Gen Intel(R) Core(TM) i7-1165G7 @ 2.80GHz, fs: btrfs
+# date: 2026-10-09T01:48:17+05:30
+## group commit: generated commands (seed 7), snapshots off, fast book
+### in200k sync=none batch=64 run 1
+time     0.026 s for 200000 new commands (7721126/s), recovery 0.037 s, 0 fsyncs
+### in200k sync=none batch=64 run 2
+time     0.025 s for 200000 new commands (8071034/s), recovery 0.013 s, 0 fsyncs
+### in200k sync=none batch=64 run 3
+time     0.024 s for 200000 new commands (8209461/s), recovery 0.018 s, 0 fsyncs
+### in5k sync=batch batch=1 run 1
+time     16.490 s for 5000 new commands (303/s), recovery 0.020 s, 5000 fsyncs
+### in5k sync=batch batch=1 run 2
+time     3.862 s for 5000 new commands (1295/s), recovery 0.001 s, 5000 fsyncs
+### in5k sync=batch batch=1 run 3
+time     4.411 s for 5000 new commands (1133/s), recovery 0.002 s, 5000 fsyncs
+### in50k sync=batch batch=8 run 1
+time     15.358 s for 50000 new commands (3256/s), recovery 0.001 s, 6250 fsyncs
+### in50k sync=batch batch=8 run 2
+time     13.502 s for 50000 new commands (3703/s), recovery 0.002 s, 6250 fsyncs
+### in50k sync=batch batch=8 run 3
+time     5.037 s for 50000 new commands (9927/s), recovery 0.001 s, 6250 fsyncs
+### in200k sync=batch batch=64 run 1
+time     2.636 s for 200000 new commands (75882/s), recovery 0.002 s, 3125 fsyncs
+### in200k sync=batch batch=64 run 2
+time     9.708 s for 200000 new commands (20602/s), recovery 0.002 s, 3125 fsyncs
+### in200k sync=batch batch=64 run 3
+time     11.588 s for 200000 new commands (17259/s), recovery 0.002 s, 3125 fsyncs
+### in200k sync=batch batch=512 run 1
+time     2.126 s for 200000 new commands (94062/s), recovery 0.003 s, 391 fsyncs
+### in200k sync=batch batch=512 run 2
+time     1.234 s for 200000 new commands (162059/s), recovery 0.002 s, 391 fsyncs
+### in200k sync=batch batch=512 run 3
+time     1.344 s for 200000 new commands (148849/s), recovery 0.001 s, 391 fsyncs
+## snapshot pause: gen2m (2M commands), snapshot every 200k, sync=batch 64
+### run 1
+digest   b3df3bac1e73d7f6
+time     46.199 s for 2000000 new commands (43291/s), recovery 0.005 s, 31260 fsyncs
+snapshots 10, pause mean 2.13 ms, max 2.72 ms
+### run 2
+digest   b3df3bac1e73d7f6
+time     64.588 s for 2000000 new commands (30965/s), recovery 0.002 s, 31260 fsyncs
+snapshots 10, pause mean 4.47 ms, max 9.92 ms
+### run 3
+digest   b3df3bac1e73d7f6
+time     83.685 s for 2000000 new commands (23899/s), recovery 0.003 s, 31260 fsyncs
+snapshots 10, pause mean 6.08 ms, max 19.17 ms
+-rw-r--r-- 1 creskd creskd 50117985 Oct  9 01:53 target/tmp/m14b/j
+-rw-r--r-- 1 creskd creskd    48175 Oct  9 01:53 target/tmp/m14b/s
+## recovery of the 2M journal: from the last snapshot vs from zero
+### from snapshot, run 1
+recovered  from the snapshot, 0 records replayed, 0 torn bytes cut
+commands 2000000  events 2737537  trades 694144  rejects 745098
+digest   b3df3bac1e73d7f6
+time     0.018 s
+### from zero, run 1
+recovered  without a snapshot, 2000000 records replayed, 0 torn bytes cut
+commands 2000000  events 2737537  trades 694144  rejects 745098
+digest   b3df3bac1e73d7f6
+time     0.246 s
+### from snapshot, run 2
+recovered  from the snapshot, 0 records replayed, 0 torn bytes cut
+commands 2000000  events 2737537  trades 694144  rejects 745098
+digest   b3df3bac1e73d7f6
+time     0.017 s
+### from zero, run 2
+recovered  without a snapshot, 2000000 records replayed, 0 torn bytes cut
+commands 2000000  events 2737537  trades 694144  rejects 745098
+digest   b3df3bac1e73d7f6
+time     0.249 s
+### from snapshot, run 3
+recovered  from the snapshot, 0 records replayed, 0 torn bytes cut
+commands 2000000  events 2737537  trades 694144  rejects 745098
+digest   b3df3bac1e73d7f6
+time     0.018 s
+### from zero, run 3
+recovered  without a snapshot, 2000000 records replayed, 0 torn bytes cut
+commands 2000000  events 2737537  trades 694144  rejects 745098
+digest   b3df3bac1e73d7f6
+time     0.249 s
+## replay of the same journal, for its digest
+digest   b3df3bac1e73d7f6

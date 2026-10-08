@@ -1337,9 +1337,42 @@ Each target ran 10 minutes on 2026-10-08 (all with the text dictionary, which on
 - **Crash matrix** (`tests/recovery.rs`): 40 sessions of 200 commands; snapshots at none, the start, the end and 4 random points; the journal cut at every
   record boundary after the snapshot and at one random byte inside every record. For each: recover (both books), run the commands the journal lost,
   and require the uninterrupted run's event bytes, counters, digest and book state.
-- **A real crash** (`tests/crash.rs`): the `lob` binary, killed with SIGKILL 7 times at different moments; after each, `lob recover` must report the digest
-  of exactly the commands the journal kept. Then a restart runs to the end, and its digest and journal bytes equal an uninterrupted run's.
+- **A real crash** (`tests/crash.rs`): the `lob` binary (fsync per 8 commands, a snapshot every 50), killed with SIGKILL 7 times at different moments.
+  After each kill, `lob recover` must report the digest of exactly the commands the journal kept, and never fewer than the last round kept. Then a restart
+  runs to the end; its digest and journal bytes equal an uninterrupted run's, and recovering once more gives the same digest.
 - **Codecs:** the snapshot property (accepted bytes are canonical, restore into both books, invariants hold), a fuzz target `book_snapshot`
   (it re-seals the CRC so the fuzzer gets past it), and every-cut and every-bit-flip tests.
 - **What these can't prove:** that `fsync` is called where it must be. A killed process loses nothing in the page cache; only a power cut (or a
   fault-injecting file system) tells the difference. The sync points are argued in D78 and reviewed, not tested.
+
+### M14 results (2026-10-09)
+- **Correctness:** the crash matrix (D81) and the SIGKILL test pass, and so do the codec properties (20,000 cases of the snapshot property). Restoring
+  from any session's state gives `fast.state() == ref.state()`. The engine's journal is byte-identical to its input journal, and `recover` gives `lob replay`'s digest.
+- **Fuzzing:** `book_snapshot`, 5 minutes, 11.8M inputs, coverage 921 edges, no crash.
+- **A real bug found on the way:** the snapshot property sent extreme prices to the fast book for the first time, and the ladder's window offset
+  (`ticks - base`) overflowed `i64` for a price near `i64::MIN` once the window sat near 0 (a panic in debug builds; in release a wrapped value).
+  The offset is now `i128`, the window base saturates, and a test runs both books at the `i64` extremes.
+  Also from the property: a crafted snapshot could overflow a level's `u64` total, so `validate` now checks the book's total quantity fits.
+- **Mutation-checked:** 45 planted bugs in the snapshot codec and validation, recovery, the engine, the recorder, the journal offset code, both books'
+  `state`/`from_state` and the ladder fix. The first pass caught 37 of 45. The survivors exposed real gaps: the SIGKILL test never got far enough to
+  take a snapshot (kills land within 250 ms, snapshots came every 4,000 commands), and three validation branches had no test. After the fixes,
+  **44 of 45**. The survivor (`since_snapshot = 1`, which moves the next snapshot one command earlier) is equivalent: any snapshot point is correct.
+- **Cost** ([raw output](bench/results/2026-10-09-m14-recovery/)), on this laptop's NVMe under btrfs, other sessions running. fsync times varied
+  2–4× between runs, so read these as ranges:
+
+  | sync | batch | commands/s |
+  |---|---|---|
+  | none | 64 | 7.7–8.2M |
+  | batch | 1 | 300–1,300 (one fsync per command: 0.8–3.3 ms each) |
+  | batch | 8 | 3,300–9,900 |
+  | batch | 64 | 17,000–76,000 |
+  | batch | 512 | 94,000–162,000 |
+
+  The fsync is the whole cost: without it the engine runs at 8M commands/s, and every 8× bigger batch is about 8× faster until the batch is big
+  enough that matching and encoding show. Group commit is the only reason durability is affordable here. A real engine would batch whatever has
+  arrived since the last flush (adaptive, as in lsmkv), not a fixed count, so a quiet market doesn't wait for 512 commands.
+- **Snapshot pause** (gen2m, a snapshot every 200k commands, a book of about 1,600 resting orders, a 48 KB file): mean 2.1–6.1 ms, max 2.7–19 ms per
+  snapshot. That's mostly the two fsyncs (file and directory) plus the rename, not encoding the book. At this book size, D77's
+  write-on-the-matching-thread is fine, and a background writer would remove fsync time, not encoding time.
+- **Recovery** of the 2M-command journal (50 MB): 18 ms from the last snapshot (nothing after it to replay) against 246–249 ms replaying from zero
+  (about 8M commands/s). The snapshot's value grows with the journal: replay cost is linear in history, the snapshot's is linear in the live book.
