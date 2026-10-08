@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use crate::book::{BookConfig, Level, OrderBook};
-use crate::command::{Command, Event, RejectReason, TimeInForce};
+use crate::command::{Command, Event, NewOrder, RejectReason, Stp, StpAction, TimeInForce};
 use crate::types::{OrderId, Price, Qty, Side};
 
 #[derive(Clone, Copy, Debug)]
@@ -15,6 +15,8 @@ struct Resting {
     qty: Qty,
     /// Remembered so a modify can't turn a post-only order into a taker (D11).
     post_only: bool,
+    /// Remembered so a modify that crosses uses the order's own action (D69).
+    stp: Option<Stp>,
 }
 
 /// Price -> orders at that price, oldest first.
@@ -70,8 +72,10 @@ impl RefBook {
             .is_some_and(|best| side.crosses(price, best))
     }
 
-    /// Whether the opposite side holds at least `qty` at prices crossing `limit` (for FOK).
-    fn can_fill(&self, side: Side, qty: Qty, limit: Price) -> bool {
+    /// Whether matching would fill all of `qty` at prices crossing `limit` (for FOK).
+    /// Orders of the taker's STP group never fill it (D71): with cancel-oldest they're
+    /// skipped, and with cancel-newest or cancel-both matching stops at the first one.
+    fn can_fill(&self, side: Side, qty: Qty, limit: Price, stp: Option<Stp>) -> bool {
         let levels = self.levels(side.opposite());
         let crossing: Box<dyn Iterator<Item = (&Price, &VecDeque<Resting>)>> = match side {
             Side::Buy => Box::new(levels.iter()),
@@ -82,24 +86,30 @@ impl RefBook {
             if !side.crosses(limit, price) {
                 break;
             }
-            available += queue.iter().map(|o| o.qty.0).sum::<u64>();
-            if available >= qty.0 {
-                return true;
+            for order in queue {
+                match Stp::conflict(stp, order.stp) {
+                    None => available += order.qty.0,
+                    Some(StpAction::CancelOldest) => {}
+                    Some(StpAction::CancelNewest | StpAction::CancelBoth) => return false,
+                }
+                if available >= qty.0 {
+                    return true;
+                }
             }
         }
         false
     }
 
     /// A new limit (`limit = Some`) or market (`limit = None`) order.
-    fn submit(
-        &mut self,
-        id: OrderId,
-        side: Side,
-        qty: Qty,
-        limit: Option<Price>,
-        tif: TimeInForce,
-        out: &mut Vec<Event>,
-    ) {
+    fn submit(&mut self, order: NewOrder, out: &mut Vec<Event>) {
+        let NewOrder {
+            id,
+            side,
+            qty,
+            limit,
+            tif,
+            stp,
+        } = order;
         let check = self.config.check(qty, limit).and_then(|()| {
             if self.last_id.is_some_and(|last| id <= last) {
                 Err(RejectReason::IdNotIncreasing)
@@ -120,18 +130,19 @@ impl RefBook {
 
         if tif == TimeInForce::Fok {
             let limit = limit.expect("only limit orders carry a time in force");
-            if !self.can_fill(side, qty, limit) {
+            if !self.can_fill(side, qty, limit, stp) {
                 out.push(Event::Cancelled { id, remaining: qty });
                 return;
             }
         }
-        let remaining = self.take(id, side, qty, limit, out);
+        let remaining = self.take(id, side, qty, limit, stp, out);
         if remaining.0 == 0 {
             return;
         }
         match (limit, tif) {
             (Some(price), TimeInForce::Gtc | TimeInForce::PostOnly) => {
-                self.rest(id, side, price, remaining, tif == TimeInForce::PostOnly)
+                let post_only = tif == TimeInForce::PostOnly;
+                self.rest(id, side, price, remaining, post_only, stp)
             }
             // Market and IOC orders never rest. (A FOK order that passed `can_fill` filled
             // completely, so it never gets here.)
@@ -139,23 +150,38 @@ impl RefBook {
         }
     }
 
-    fn rest(&mut self, id: OrderId, side: Side, price: Price, qty: Qty, post_only: bool) {
+    fn rest(
+        &mut self,
+        id: OrderId,
+        side: Side,
+        price: Price,
+        qty: Qty,
+        post_only: bool,
+        stp: Option<Stp>,
+    ) {
         self.levels_mut(side)
             .entry(price)
             .or_default()
-            .push_back(Resting { id, qty, post_only });
+            .push_back(Resting {
+                id,
+                qty,
+                post_only,
+                stp,
+            });
         self.resting.insert(id, (side, price));
     }
 
     /// Match `qty` against the opposite side: best price first, oldest order first
     /// within a price, for as long as the price crosses `limit` (`None`: any price).
-    /// Every fill trades at the resting (maker) order's price. Returns what's left.
+    /// Every fill trades at the resting (maker) order's price. Returns what's left: zero
+    /// if self-trade prevention cancelled the taker (D70), which has then been reported.
     fn take(
         &mut self,
         taker: OrderId,
         side: Side,
         mut qty: Qty,
         limit: Option<Price>,
+        stp: Option<Stp>,
         out: &mut Vec<Event>,
     ) -> Qty {
         // Borrow the opposite side and the index as separate fields, so both can change.
@@ -179,6 +205,26 @@ impl RefBook {
                 let Some(maker) = queue.front_mut() else {
                     break;
                 };
+                if let Some(action) = Stp::conflict(stp, maker.stp) {
+                    // Same group: cancel instead of trading. The resting order goes first.
+                    if action != StpAction::CancelNewest {
+                        out.push(Event::SelfTradeCancelled {
+                            id: maker.id,
+                            remaining: maker.qty,
+                        });
+                        let id = maker.id;
+                        queue.pop_front();
+                        self.resting.remove(&id);
+                    }
+                    if action != StpAction::CancelOldest {
+                        out.push(Event::SelfTradeCancelled {
+                            id: taker,
+                            remaining: qty,
+                        });
+                        qty = Qty(0);
+                    }
+                    continue;
+                }
                 let fill = qty.0.min(maker.qty.0);
                 out.push(Event::Trade {
                     taker,
@@ -266,9 +312,10 @@ impl RefBook {
         }
         let (_, _, order) = self.unlink(id).expect("order is resting");
         out.push(Event::Modified { id, qty, price });
-        let remaining = self.take(id, side, qty, Some(price), out);
+        // The order is off the book now, so it can't meet itself; its own action applies.
+        let remaining = self.take(id, side, qty, Some(price), order.stp, out);
         if remaining.0 > 0 {
-            self.rest(id, side, price, remaining, order.post_only);
+            self.rest(id, side, price, remaining, order.post_only, order.stp);
         }
     }
 }
@@ -287,16 +334,8 @@ impl OrderBook for RefBook {
 
     fn apply(&mut self, cmd: &Command, out: &mut Vec<Event>) {
         match *cmd {
-            Command::Limit {
-                id,
-                side,
-                qty,
-                price,
-                tif,
-                ..
-            } => self.submit(id, side, qty, Some(price), tif, out),
-            Command::Market { id, side, qty, .. } => {
-                self.submit(id, side, qty, None, TimeInForce::Gtc, out)
+            Command::Limit { .. } | Command::Market { .. } => {
+                self.submit(cmd.new_order().expect("a new order"), out)
             }
             Command::Modify { id, qty, price } => self.modify(id, qty, price, out),
             Command::Cancel { id } => self.cancel(id, out),
@@ -426,11 +465,12 @@ mod tests {
                 "limit 3 sell 5 102",
             ],
         );
-        assert!(book.can_fill(Side::Buy, Qty(10), Price(101)));
-        assert!(!book.can_fill(Side::Buy, Qty(11), Price(101)));
-        assert!(book.can_fill(Side::Buy, Qty(15), Price(500)));
-        assert!(!book.can_fill(Side::Buy, Qty(1), Price(99)));
-        assert!(!book.can_fill(Side::Sell, Qty(1), Price(1)));
+        let can_fill = |side, qty, price| book.can_fill(side, Qty(qty), Price(price), None);
+        assert!(can_fill(Side::Buy, 10, 101));
+        assert!(!can_fill(Side::Buy, 11, 101));
+        assert!(can_fill(Side::Buy, 15, 500));
+        assert!(!can_fill(Side::Buy, 1, 99));
+        assert!(!can_fill(Side::Sell, 1, 1));
     }
 
     #[test]
@@ -438,7 +478,7 @@ mod tests {
         let mut book = RefBook::new();
         // Bypass matching to build a book that apply() could never produce.
         for (id, side, price) in [(1, Side::Buy, 101), (2, Side::Sell, 100)] {
-            book.rest(OrderId(id), side, Price(price), Qty(1), false);
+            book.rest(OrderId(id), side, Price(price), Qty(1), false, None);
             book.last_id = Some(OrderId(id));
         }
         assert!(book.check_invariants().unwrap_err().contains("crossed"));

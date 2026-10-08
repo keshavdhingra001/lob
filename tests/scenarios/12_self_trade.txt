@@ -1,0 +1,67 @@
+# Self-trade prevention (D67-D70). Orders in the same STP group never trade with each
+# other; the incoming order's action decides what happens instead.
+limit 1 sell 5 100 g=1 stp=cn
+> accepted 1
+limit 2 sell 5 100
+> accepted 2
+limit 3 sell 5 101 g=1 stp=cn
+> accepted 3
+
+# Cancel oldest: each same-group resting order is cancelled and matching goes on.
+# What's left rests as usual.
+limit 4 buy 12 101 g=1 stp=co
+> accepted 4
+> stp-cancelled 1 5
+> trade 4 2 buy 5 100
+> stp-cancelled 3 5
+book
+> bid 101 7 (1)
+cancel 4
+> cancelled 4 7
+
+# Cancel newest: the incoming order's remainder is cancelled, even though it's GTC.
+# Fills before that stand, and the resting order keeps its place in the queue.
+limit 5 sell 5 100
+> accepted 5
+limit 6 sell 5 100 g=1 stp=co
+> accepted 6
+limit 7 sell 5 100
+> accepted 7
+limit 8 buy 12 100 g=1 stp=cn
+> accepted 8
+> trade 8 5 buy 5 100
+> stp-cancelled 8 7
+book
+> ask 100 10 (2)
+
+# Cancel both: the resting order's cancel comes first.
+limit 9 buy 3 100 g=1 stp=cb
+> accepted 9
+> stp-cancelled 6 5
+> stp-cancelled 9 3
+book
+> ask 100 5 (1)
+
+# Another group trades normally.
+limit 10 buy 2 100 g=2 stp=cn
+> accepted 10
+> trade 10 7 buy 2 100
+
+# So does an ungrouped order, against grouped ones.
+limit 11 sell 4 100 g=1 stp=cb
+> accepted 11
+market 12 buy 5
+> accepted 12
+> trade 12 7 buy 3 100
+> trade 12 11 buy 2 100
+book
+> ask 100 2 (1)
+
+# A market order carries a group too. Nothing else crosses, so the rest is cancelled
+# as for any market order.
+market 13 buy 5 g=1 stp=co
+> accepted 13
+> stp-cancelled 11 2
+> cancelled 13 5
+book
+> empty

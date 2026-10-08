@@ -66,6 +66,17 @@ pub struct Stp {
     pub action: StpAction,
 }
 
+impl Stp {
+    /// The action to take instead of a trade between an incoming order (`taker`) and a
+    /// resting one (`maker`): the taker's action if both are in the same group (D69, D70).
+    pub fn conflict(taker: Option<Stp>, maker: Option<Stp>) -> Option<StpAction> {
+        match (taker, maker) {
+            (Some(t), Some(m)) if t.group == m.group => Some(t.action),
+            _ => None,
+        }
+    }
+}
+
 /// D68.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum StpAction {
@@ -116,7 +127,49 @@ pub enum RejectReason {
     WouldCross,
 }
 
+/// A limit or market order as both books match it (`limit` is `None` for a market order,
+/// whose time in force is GTC: with no limit it can't rest anyway).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NewOrder {
+    pub id: OrderId,
+    pub side: Side,
+    pub qty: Qty,
+    pub limit: Option<Price>,
+    pub tif: TimeInForce,
+    pub stp: Option<Stp>,
+}
+
 impl Command {
+    /// The new order this command places, if it places one.
+    pub fn new_order(&self) -> Option<NewOrder> {
+        match *self {
+            Command::Limit {
+                id,
+                side,
+                qty,
+                price,
+                tif,
+                stp,
+            } => Some(NewOrder {
+                id,
+                side,
+                qty,
+                limit: Some(price),
+                tif,
+                stp,
+            }),
+            Command::Market { id, side, qty, stp } => Some(NewOrder {
+                id,
+                side,
+                qty,
+                limit: None,
+                tif: TimeInForce::Gtc,
+                stp,
+            }),
+            Command::Modify { .. } | Command::Cancel { .. } => None,
+        }
+    }
+
     /// The order id this command refers to.
     pub fn id(&self) -> OrderId {
         match *self {

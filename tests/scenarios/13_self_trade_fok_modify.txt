@@ -1,0 +1,57 @@
+# FOK with self-trade prevention (D71): same-group quantity never fills an order.
+limit 1 sell 5 100 g=1 stp=cn
+> accepted 1
+limit 2 sell 5 100
+> accepted 2
+limit 3 sell 5 101
+> accepted 3
+
+# Cancel oldest skips the group's 5: only 10 is fillable, so 11 is killed, and a
+# killed FOK cancels nothing.
+limit 4 buy 11 101 fok g=1 stp=co
+> accepted 4
+> cancelled 4 11
+book
+> ask 101 5 (1)
+> ask 100 10 (2)
+
+# 10 fills, cancelling the group's order on the way.
+limit 5 buy 10 101 fok g=1 stp=co
+> accepted 5
+> stp-cancelled 1 5
+> trade 5 2 buy 5 100
+> trade 5 3 buy 5 101
+book
+> empty
+
+# Cancel newest stops at the first same-group order, so only the 5 ahead of it counts.
+limit 6 sell 5 100
+> accepted 6
+limit 7 sell 5 100 g=1 stp=cn
+> accepted 7
+limit 8 sell 5 100
+> accepted 8
+limit 9 buy 6 100 fok g=1 stp=cn
+> accepted 9
+> cancelled 9 6
+limit 10 buy 5 100 fok g=1 stp=cb
+> accepted 10
+> trade 10 6 buy 5 100
+book
+> ask 100 10 (2)
+
+# A modify that crosses makes the order a taker, with its own action (D69).
+limit 11 buy 5 99 g=1 stp=cb
+> accepted 11
+modify 11 5 100
+> modified 11 5 100
+> stp-cancelled 7 5
+> stp-cancelled 11 5
+book
+> ask 100 5 (1)
+
+# Post-only is unchanged: crossing its own group is still a reject.
+limit 12 sell 1 99 g=3 stp=co
+> accepted 12
+limit 13 buy 1 99 post g=3 stp=co
+> rejected 13 would-cross

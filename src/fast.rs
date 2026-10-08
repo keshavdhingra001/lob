@@ -13,9 +13,10 @@
 //! commands and require identical events.
 
 use std::collections::HashMap;
+use std::num::NonZeroU16;
 
 use crate::book::{BookConfig, Level, OrderBook};
-use crate::command::{Command, Event, RejectReason, TimeInForce};
+use crate::command::{Command, Event, NewOrder, RejectReason, Stp, StpAction, TimeInForce};
 use crate::hash::IdBuildHasher;
 use crate::ladder::Ladder;
 use crate::types::{OrderId, Price, Qty, Side};
@@ -81,7 +82,27 @@ struct Node {
     level: u32,
     prev: u32,
     next: u32,
+    /// STP group, 0 for none (D72). `Option<Stp>` would make the node 40 bytes.
+    group: u16,
+    /// The order's own STP action; meaningless when `group` is 0.
+    action: StpAction,
     post_only: bool,
+}
+
+impl Node {
+    fn stp(&self) -> Option<Stp> {
+        NonZeroU16::new(self.group).map(|group| Stp {
+            group,
+            action: self.action,
+        })
+    }
+}
+
+/// The taker's action if `maker` is in its STP group (D70). A `group` is never 0, so an
+/// ungrouped maker never matches.
+fn conflict(stp: Option<Stp>, maker: &Node) -> Option<StpAction> {
+    stp.filter(|s| s.group.get() == maker.group)
+        .map(|s| s.action)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -178,8 +199,12 @@ impl FastBook {
             .is_some_and(|best| side.crosses(price, best))
     }
 
-    /// FOK pre-scan: walks levels, not orders, thanks to `total`.
-    fn can_fill(&self, side: Side, qty: Qty, limit: Price) -> bool {
+    /// FOK pre-scan: walks levels, not orders, thanks to `total`. Level totals can't see
+    /// STP groups, so a grouped taker walks the orders instead (D71).
+    fn can_fill(&self, side: Side, qty: Qty, limit: Price, stp: Option<Stp>) -> bool {
+        if stp.is_some() {
+            return self.can_fill_grouped(side, qty, limit, stp);
+        }
         let (mut available, mut enough) = (0, false);
         self.visit_best_first(side.opposite(), |price, l| {
             if !side.crosses(limit, price) {
@@ -192,15 +217,42 @@ impl FastBook {
         enough
     }
 
-    fn submit(
-        &mut self,
-        id: OrderId,
-        side: Side,
-        qty: Qty,
-        limit: Option<Price>,
-        tif: TimeInForce,
-        out: &mut Vec<Event>,
-    ) {
+    /// `can_fill` order by order: same-group orders don't fill. Cancel-oldest skips them;
+    /// cancel-newest and cancel-both stop matching at the first one.
+    fn can_fill_grouped(&self, side: Side, qty: Qty, limit: Price, stp: Option<Stp>) -> bool {
+        let (mut available, mut enough) = (0, false);
+        self.visit_best_first(side.opposite(), |price, l| {
+            if !side.crosses(limit, price) {
+                return false;
+            }
+            let mut slot = self.levels[l].head;
+            while slot != NIL {
+                let order = &self.orders[slot];
+                match conflict(stp, order) {
+                    None => available += order.qty,
+                    Some(StpAction::CancelOldest) => {}
+                    Some(StpAction::CancelNewest | StpAction::CancelBoth) => return false,
+                }
+                if available >= qty.0 {
+                    enough = true;
+                    return false;
+                }
+                slot = order.next;
+            }
+            true
+        });
+        enough
+    }
+
+    fn submit(&mut self, order: NewOrder, out: &mut Vec<Event>) {
+        let NewOrder {
+            id,
+            side,
+            qty,
+            limit,
+            tif,
+            stp,
+        } = order;
         let check = self.config.check(qty, limit).and_then(|()| {
             if self.last_id.is_some_and(|last| id <= last) {
                 Err(RejectReason::IdNotIncreasing)
@@ -221,18 +273,19 @@ impl FastBook {
 
         if tif == TimeInForce::Fok {
             let limit = limit.expect("only limit orders carry a time in force");
-            if !self.can_fill(side, qty, limit) {
+            if !self.can_fill(side, qty, limit, stp) {
                 out.push(Event::Cancelled { id, remaining: qty });
                 return;
             }
         }
-        let remaining = self.take(id, side, qty.0, limit, out);
+        let remaining = self.take(id, side, qty.0, limit, stp, out);
         if remaining == 0 {
             return;
         }
         match (limit, tif) {
             (Some(price), TimeInForce::Gtc | TimeInForce::PostOnly) => {
-                self.rest(id, side, price, remaining, tif == TimeInForce::PostOnly)
+                let post_only = tif == TimeInForce::PostOnly;
+                self.rest(id, side, price, remaining, post_only, stp)
             }
             _ => out.push(Event::Cancelled {
                 id,
@@ -242,7 +295,15 @@ impl FastBook {
     }
 
     /// Append an order to the back of its price level, creating the level if needed.
-    fn rest(&mut self, id: OrderId, side: Side, price: Price, qty: u64, post_only: bool) {
+    fn rest(
+        &mut self,
+        id: OrderId,
+        side: Side,
+        price: Price,
+        qty: u64,
+        post_only: bool,
+        stp: Option<Stp>,
+    ) {
         let level = match self.tree(side).get(price) {
             Some(l) => l,
             None => self.new_level(side, price),
@@ -254,6 +315,8 @@ impl FastBook {
             level,
             prev: tail,
             next: NIL,
+            group: stp.map_or(0, |s| s.group.get()),
+            action: stp.map_or(StpAction::CancelNewest, |s| s.action),
             post_only,
         });
         if tail == NIL {
@@ -325,13 +388,15 @@ impl FastBook {
         node
     }
 
-    /// Match against the opposite side; see `RefBook::take`. Returns the unfilled quantity.
+    /// Match against the opposite side; see `RefBook::take`. Returns the unfilled quantity,
+    /// zero if self-trade prevention cancelled the taker.
     fn take(
         &mut self,
         taker: OrderId,
         side: Side,
         mut qty: u64,
         limit: Option<Price>,
+        stp: Option<Stp>,
         out: &mut Vec<Event>,
     ) -> u64 {
         let opposite = side_ix(side.opposite());
@@ -349,6 +414,25 @@ impl FastBook {
             while qty > 0 && self.best[opposite] == level {
                 let slot = self.levels[level].head;
                 let maker = &mut self.orders[slot];
+                if let Some(action) = conflict(stp, maker) {
+                    if action != StpAction::CancelNewest {
+                        let maker_id = maker.id;
+                        out.push(Event::SelfTradeCancelled {
+                            id: maker_id,
+                            remaining: Qty(maker.qty),
+                        });
+                        self.index.remove(&maker_id);
+                        self.unlink(slot);
+                    }
+                    if action != StpAction::CancelOldest {
+                        out.push(Event::SelfTradeCancelled {
+                            id: taker,
+                            remaining: Qty(qty),
+                        });
+                        qty = 0;
+                    }
+                    continue;
+                }
                 let fill = qty.min(maker.qty);
                 maker.qty -= fill;
                 let (maker_id, maker_done) = (maker.id, maker.qty == 0);
@@ -410,9 +494,9 @@ impl FastBook {
         self.index.remove(&id);
         self.unlink(slot);
         out.push(Event::Modified { id, qty, price });
-        let remaining = self.take(id, lv.side, qty.0, Some(price), out);
+        let remaining = self.take(id, lv.side, qty.0, Some(price), node.stp(), out);
         if remaining > 0 {
-            self.rest(id, lv.side, price, remaining, node.post_only);
+            self.rest(id, lv.side, price, remaining, node.post_only, node.stp());
         }
     }
 }
@@ -456,16 +540,8 @@ impl OrderBook for FastBook {
 
     fn apply(&mut self, cmd: &Command, out: &mut Vec<Event>) {
         match *cmd {
-            Command::Limit {
-                id,
-                side,
-                qty,
-                price,
-                tif,
-                ..
-            } => self.submit(id, side, qty, Some(price), tif, out),
-            Command::Market { id, side, qty, .. } => {
-                self.submit(id, side, qty, None, TimeInForce::Gtc, out)
+            Command::Limit { .. } | Command::Market { .. } => {
+                self.submit(cmd.new_order().expect("a new order"), out)
             }
             Command::Modify { id, qty, price } => self.modify(id, qty, price, out),
             Command::Cancel { id } => self.cancel(id, out),
