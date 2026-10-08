@@ -42,6 +42,9 @@ that part of the tail is the machine (interrupts, preemption), not the code. [Mo
 - **Market data:** level updates coalesced per command, with sequence numbers, heartbeats and snapshots. A consumer detects gaps and recovers.
 - **Self-trade prevention:** an order can carry an STP group and an action (cancel newest, oldest or both). Two orders of one group never trade;
   FOK stays exact with it, and the fast book's order still fits in 32 bytes (D67–D73).
+- **Crash recovery:** `lob engine` journals each batch, fsyncs it once (group commit), and only then applies it, so no event is ever sent
+  for a command a crash could lose. It writes atomic snapshots of the logical book. After a crash, the snapshot plus the journal after it
+  give the same digest as a run that never stopped. That's checked at every cut point of the journal, and against the real binary killed with SIGKILL (D74–D81).
 
 ## How correctness is checked
 
@@ -121,17 +124,18 @@ scripts/report.sh
 | [`reference.rs`](src/reference.rs) | The reference book: `BTreeMap` of `VecDeque`s, obviously correct |
 | [`fast.rs`](src/fast.rs), [`ladder.rs`](src/ladder.rs), [`hash.rs`](src/hash.rs) | The fast book, its price ladder, its id hasher |
 | [`journal.rs`](src/journal.rs), [`replay.rs`](src/replay.rs) | Binary command journal, sequenced events, digest |
+| [`snapshot.rs`](src/snapshot.rs), [`recovery.rs`](src/recovery.rs), [`engine.rs`](src/engine.rs) | Book snapshots, crash recovery, the live engine with group commit |
 | [`scenario.rs`](src/scenario.rs), [`ledger.rs`](src/ledger.rs), [`gen.rs`](src/gen.rs), [`rng.rs`](src/rng.rs) | Test oracles and seeded order flow |
 | [`feed.rs`](src/feed.rs), [`consumer.rs`](src/consumer.rs) | L2 market data out, and a consumer that recovers from gaps |
 | [`ring.rs`](src/ring.rs), [`pipeline.rs`](src/pipeline.rs) | SPSC ring, three-thread pipeline |
 | [`itch.rs`](src/itch.rs), [`itch_book.rs`](src/itch_book.rs), [`itch_flow.rs`](src/itch_flow.rs) | NASDAQ ITCH 5.0 parser, book rebuild, translation into engine commands |
 | [`latency.rs`](src/latency.rs), [`plot.rs`](src/plot.rs), [`benches/`](benches/), [`scripts/`](scripts/) | Measurement harness, percentile plots, criterion, the report script |
-| [`main.rs`](src/main.rs) | The `lob` CLI: REPL, `gen`, `replay`, `bench`, `latency`, `plot`, `feed`, `pipeline`, `itch` |
+| [`main.rs`](src/main.rs) | The `lob` CLI: REPL, `gen`, `replay`, `bench`, `latency`, `plot`, `feed`, `pipeline`, `itch`, `engine`, `recover` |
 
 ## Not built
 
 No network gateway (input is a journal file, so every latency is in-process), one symbol, no auctions, no hidden or iceberg orders,
-no risk checks beyond a fat-finger quantity limit, no crash recovery beyond replaying the journal.
+no risk checks beyond a fat-finger quantity limit, no replica to fail over to.
 [DESIGN.md](DESIGN.md#not-built-d61) says where each would go.
 
 ## Build history
@@ -150,5 +154,6 @@ no risk checks beyond a fat-finger quantity limit, no crash recovery beyond repl
 - [x] **M11** Benchmark report: one script, real ITCH flow through both books, BENCHMARKS.md
 - [x] **M12** Final write-up: DESIGN overview and index, percentile plots, this README
 - [x] **M13** Self-trade prevention: STP groups, three actions, FOK and modify rules, journal v2
+- [x] **M14** Crash recovery: logical-book snapshots, group commit, recovery proved by digest at every crash point
 
-Each milestone's decisions are in [DESIGN.md](DESIGN.md), numbered D1–D73.
+Each milestone's decisions are in [DESIGN.md](DESIGN.md), numbered D1–D81.

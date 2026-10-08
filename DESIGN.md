@@ -21,6 +21,8 @@ so later ones sometimes replace earlier ones, and each replaced entry says what 
   tick and max-quantity checks (D14), self-trade prevention by STP group (D67–D73).
 - **Input and output:** a checksummed binary command journal (D15, D16); a sequence-numbered event stream with a 64-bit digest (D17);
   an L2 feed with gap recovery (D40–D44); a three-thread pipeline whose output equals one thread's byte for byte (D45–D47).
+- **Crash recovery:** a live engine with group commit (D78) and atomic snapshots of the logical book (D74–D77). Recovery replays the journal
+  after the snapshot, so the recovered digest equals the uninterrupted run's (D79, D81).
 - **How it's checked:** scenario scripts and an invariant checker (D10), a conservation ledger built from events alone (D13), differential
   testing of the two books over 15M commands (D22), property tests (D49–D52), mutation checks of every milestone, a real NASDAQ day
   replayed with zero errors (D37, D38), and our matching compared with NASDAQ's on real executions (D54).
@@ -38,6 +40,7 @@ so later ones sometimes replace earlier ones, and each replaced entry says what 
 | Fast book | D19–D21, D31, D33, D34 |
 | No allocation on the hot path | D5, D32 |
 | Journal, replay, digest | D15–D17 |
+| Crash recovery: snapshots, group commit | D74–D81, M14 results |
 | Test oracles and generated flow | D10, D13, D18, D22, D49–D52, D64–D66 |
 | Latency and profiling | D23–D29, D48, D55, D60 |
 | Real market data (NASDAQ ITCH 5.0) | D35–D39, D54 |
@@ -65,8 +68,7 @@ What a production exchange has that this engine doesn't, and where each would go
 - **Hidden, iceberg, pegged and stop orders.** The FOK pre-scan (D12) is correct only because all quantity is visible.
 - **Decrement-and-cancel self-trade prevention** (CME's fourth mode; D68). The three other modes are built (D67–D73).
 - **Pre-trade risk** beyond the fat-finger quantity limit: position and notional limits (D14).
-- **Crash recovery and replicas.** The journal is a recording, not a WAL: it isn't fsynced (D15). Recovery would be "replay the journal" (D4),
-  but there are no book snapshots to start from, and no replica.
+- **Replicas.** Crash recovery is built (D74–D81), but there's one copy: no standby replaying the journal over the network, and no failover.
 - **Arbitrary client ids.** Ids must increase per session (D30). A gateway would map client ids to internal increasing ones.
 - **Timestamps on events.** The engine never reads a clock (D4). A gateway would put a time inside each command, and events would carry it.
 - **Entry-time priority for orders displayed late**, which NASDAQ has (M11 results). The engine only sees arrival order.
@@ -75,6 +77,8 @@ What a production exchange has that this engine doesn't, and where each would go
 ## Future work (D63)
 
 - Top-N or incremental snapshots: full-depth recovery moved 1.14 GB for a 42 MB AAPL feed (M11 results).
+- Journal segments deleted once a snapshot covers them (D80); snapshots written off the matching thread (D77).
+- A power-loss test of the fsync points (D81), e.g. on a fault-injecting file system.
 - `perf stat` on the fast book's cancel p99 in the deep200k journal (BENCHMARKS.md).
 - The ITCH runs with a controlled page cache (M7's throughput depends on whether the file is cached).
 - Longer fuzzing runs on a quiet machine, with seed corpora from the scenario files and the generator (D66).
@@ -1275,3 +1279,67 @@ Each target ran 10 minutes on 2026-10-08 (all with the text dictionary, which on
   fast book 29.2–29.4 M/s before, 27.5–28.3 M/s after, **about 4% slower**. The taker now checks `stp` before every fill and `Node` writes two more fields.
   The reference book didn't move beyond noise (17.6–17.9 vs 18.0–18.5 M/s). With 3 groups (a different workload, mostly more cancels) the fast book
   runs 22.5–25.6 M/s.
+
+### D74: A snapshot is the logical book (M14)
+- **What:** `BookState` = the rules (`BookConfig`), the highest id accepted (`last_id`, D30), and every resting order (id, side, price,
+  open qty, post-only, STP) in priority order: bids best first, then asks best first, oldest first within a price. Both books implement
+  `state()` and `from_state()`, so a snapshot written by either restores into either. The property tests require `fast.state() == ref.state()`
+  after every session.
+- **Alternative:** dump the fast book's memory (slabs, free lists, ladder windows). Restoring would be a copy, but the format would be tied to
+  one book's layout, every M4–M6 change would break old snapshots, and it would carry state (free-list order, window base) that doesn't
+  change behaviour.
+- **Restore** rebuilds by appending each order to its level in that order, not by replaying `limit` commands: those would fail the id check
+  (D30) and could trade. `from_state` validates first: positive quantities within `max_qty`, prices on the grid, unique ids not above `last_id`,
+  priority order, an uncrossed book, and a total quantity that fits in `u64` (level totals are `u64`). A book built from a bad state would only
+  fail later, far from the cause.
+
+### D75: The snapshot also records where the session stood
+- **What:** next to the book, the journal byte offset where the next record starts, and the replay counters (commands, events, trades, rejects)
+  with the **running digest**. FNV-1a's state is its output, so hashing resumes from it (`Fnv64::resume`), and event numbers continue too.
+- **Why:** with it, recovery is provable: the recovered digest over the whole session equals the uninterrupted run's, not just "the book looks the same".
+- `Recorder` (`replay.rs`) is the resumable part of `replay`: counters, digest and event encoding, with the book passed in.
+
+### D76: Snapshot file: whole or not at all
+- **Format:** `"LOBS"`, version 1, a fixed header (rules, last id, counters, journal offset, order count), 29-byte order records, and a CRC32 over everything.
+  One spelling per value (no group is group 0 with action 0), so accepted bytes are canonical (D50).
+- **Write:** to `<path>.tmp`, `fsync`, `rename` over the old snapshot, `fsync` the directory. A crash leaves the old snapshot or the new one.
+  Only the latest is kept.
+- **Read:** any damage (length, CRC, validation) refuses the file, and recovery replays the journal from the start instead: slower, never wrong.
+
+### D77: Snapshots on the matching thread, every N commands
+- **What:** `lob engine ... <every>`, default 100,000 commands. The engine stops matching while it writes, between batches.
+- **Alternatives:** copy the book and write from another thread (the pause becomes a copy), or `fork()` and let copy-on-write give a frozen view
+  (Redis does this). Both shorten the pause; neither changes what is recovered. The pause is measured (M14 results) and is the number that says whether
+  they're worth it.
+
+### D78: Group commit, and no event before its command is durable
+- **What:** per batch (default 64 commands): append them all, one `fdatasync`, then apply them and publish their events. With `none` the engine never
+  syncs except before a snapshot.
+- **The rule:** an event is published only after its command is durable. Otherwise a power cut could lose a command whose trade was already sent,
+  and the recovered engine would contradict it.
+- **Alternatives:** fsync per command (one disk flush per order; the batch amortizes it) or never (survives a process crash, since the page cache
+  outlives the process, but not a power cut). A snapshot always syncs the journal first, in every mode: it must never cover commands the journal can still lose.
+- lsmkv's group commit is the same idea.
+
+### D79: Recovery
+- Load the snapshot if usable, check its rules match the engine's, replay the journal from its offset, and continue. A restarted `lob engine` does
+  exactly this, so restart and recovery are one path.
+- **Torn tail** (a crash mid-append): cut off, and the cut made durable, before anything is appended. Otherwise the next record would land after
+  garbage, and the file would read as damaged (D16) from then on.
+- **Damage before the last record:** refuse (D16). **A snapshot past the end of the journal:** refuse. It describes commands the journal lost.
+- **A journal shorter than its header** is a crash during creation: the engine starts a new one.
+
+### D80: One journal, never truncated
+- The snapshot only saves time; the journal stays the full history (replay from zero always works). Rotating it into segments and deleting the ones
+  a snapshot covers is how it would stay bounded; listed under future work.
+
+### D81: How recovery is proved
+- **Crash matrix** (`tests/recovery.rs`): 40 sessions of 200 commands; snapshots at none, the start, the end and 4 random points; the journal cut at every
+  record boundary after the snapshot and at one random byte inside every record. For each: recover (both books), run the commands the journal lost,
+  and require the uninterrupted run's event bytes, counters, digest and book state.
+- **A real crash** (`tests/crash.rs`): the `lob` binary, killed with SIGKILL 7 times at different moments; after each, `lob recover` must report the digest
+  of exactly the commands the journal kept. Then a restart runs to the end, and its digest and journal bytes equal an uninterrupted run's.
+- **Codecs:** the snapshot property (accepted bytes are canonical, restore into both books, invariants hold), a fuzz target `book_snapshot`
+  (it re-seals the CRC so the fuzzer gets past it), and every-cut and every-bit-flip tests.
+- **What these can't prove:** that `fsync` is called where it must be. A killed process loses nothing in the page cache; only a power cut (or a
+  fault-injecting file system) tells the difference. The sync points are argued in D78 and reviewed, not tested.
