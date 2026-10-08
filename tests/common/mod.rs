@@ -46,6 +46,7 @@ pub fn random_command(rng: &mut Rng, next_id: &mut u64, tick: i64, groups: u16) 
                 qty,
                 price,
                 tif,
+                peak: None,
                 stp: random_stp(rng, groups),
             }
         }

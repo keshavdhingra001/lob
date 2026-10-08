@@ -5,7 +5,7 @@
 use lob::book::Level;
 use lob::feed::{self, Msg, Snapshot};
 use lob::itch::{self, Body, Header, Message, Stock};
-use lob::journal::{decode_command, encode_command, read_journal, JournalWriter};
+use lob::journal::{decode_command, encode_command, read_journal, JournalWriter, MAX_PAYLOAD};
 use std::num::NonZeroU16;
 
 use lob::snapshot::Snapshot as BookSnapshot;
@@ -39,17 +39,21 @@ fn command() -> impl Strategy<Value = Command> {
         Just(TimeInForce::PostOnly),
     ];
     let (id, qty, price) = (any::<u64>(), any::<u64>(), any::<i64>());
+    let peak = proptest::option::of(any::<u64>().prop_map(Qty));
     prop_oneof![
-        (id, side(), qty, price, tif, stp()).prop_map(|(id, side, qty, price, tif, stp)| {
-            Command::Limit {
-                id: OrderId(id),
-                side,
-                qty: Qty(qty),
-                price: Price(price),
-                tif,
-                stp,
+        (id, side(), qty, price, tif, peak, stp()).prop_map(
+            |(id, side, qty, price, tif, peak, stp)| {
+                Command::Limit {
+                    id: OrderId(id),
+                    side,
+                    qty: Qty(qty),
+                    price: Price(price),
+                    tif,
+                    peak,
+                    stp,
+                }
             }
-        }),
+        ),
         (id, side(), qty, stp()).prop_map(|(id, side, qty, stp)| Command::Market {
             id: OrderId(id),
             side,
@@ -115,7 +119,7 @@ fn near(valid: impl Strategy<Value = Vec<u8>>) -> impl Strategy<Value = Vec<u8>>
 
 fn command_bytes() -> impl Strategy<Value = Vec<u8>> {
     command().prop_map(|cmd| {
-        let mut buf = [0; 32];
+        let mut buf = [0; MAX_PAYLOAD];
         let len = encode_command(&cmd, &mut buf);
         buf[..len].to_vec()
     })
@@ -135,7 +139,7 @@ fn record_ends(commands: &[Command]) -> Vec<usize> {
     commands
         .iter()
         .map(|cmd| {
-            end += 6 + encode_command(cmd, &mut [0; 32]);
+            end += 6 + encode_command(cmd, &mut [0; MAX_PAYLOAD]);
             end
         })
         .collect()
@@ -274,6 +278,7 @@ fn book_snapshot_bytes() -> impl Strategy<Value = Vec<u8>> {
             qty,
             price,
             tif,
+            peak,
             stp,
         } => Command::Limit {
             id,
@@ -281,6 +286,7 @@ fn book_snapshot_bytes() -> impl Strategy<Value = Vec<u8>> {
             qty: Qty(qty.0 % 20),
             price: Price(price.0.rem_euclid(30)),
             tif,
+            peak: peak.map(|p| Qty(p.0 % 20)),
             stp,
         },
         Command::Market { id, side, qty, stp } => Command::Market {
@@ -352,7 +358,7 @@ proptest! {
 
     #[test]
     fn commands_round_trip_through_the_journal_encoding(cmd in command()) {
-        let mut buf = [0; 32];
+        let mut buf = [0; MAX_PAYLOAD];
         let len = encode_command(&cmd, &mut buf);
         prop_assert_eq!(decode_command(&buf[..len]), Ok(cmd));
     }
@@ -362,7 +368,7 @@ proptest! {
     #[test]
     fn accepted_command_payloads_are_canonical(bytes in near(command_bytes())) {
         if let Ok(cmd) = decode_command(&bytes) {
-            let mut buf = [0; 32];
+            let mut buf = [0; MAX_PAYLOAD];
             let len = encode_command(&cmd, &mut buf);
             prop_assert_eq!(&buf[..len], &bytes[..]);
         }

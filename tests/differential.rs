@@ -98,6 +98,7 @@ fn wide(seed: u64, n: usize, tick: i64, groups: u16) -> impl Iterator<Item = Com
                 qty,
                 price,
                 tif,
+                peak,
                 stp,
             } => Command::Limit {
                 id,
@@ -105,6 +106,7 @@ fn wide(seed: u64, n: usize, tick: i64, groups: u16) -> impl Iterator<Item = Com
                 qty,
                 price: moved(price),
                 tif,
+                peak,
                 stp,
             },
             Command::Modify { id, qty, price } => Command::Modify {

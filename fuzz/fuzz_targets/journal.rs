@@ -5,11 +5,11 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use lob::journal::{decode_command, encode_command, read_journal};
+use lob::journal::{decode_command, encode_command, read_journal, MAX_PAYLOAD};
 
 fuzz_target!(|bytes: &[u8]| {
     if let Ok(cmd) = decode_command(bytes) {
-        let mut buf = [0; 32];
+        let mut buf = [0; MAX_PAYLOAD];
         let len = encode_command(&cmd, &mut buf);
         assert_eq!(&buf[..len], bytes);
     }

@@ -234,6 +234,7 @@ mod tests {
             qty: Qty(qty),
             price: Price(price),
             tif,
+            peak: None,
             stp: None,
         }
     }

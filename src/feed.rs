@@ -248,6 +248,7 @@ impl Publisher {
                     return Err(format!("{open} was open"));
                 }
             }
+            Event::Replenished { .. } => return Err("icebergs come in M15 section 2".into()),
         }
         Ok(())
     }

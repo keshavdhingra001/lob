@@ -13,10 +13,13 @@
 //!   4 cancel  id u64                                             ( 9 bytes)
 //!   5 limit with an STP group: limit's fields | group u16 | action u8   (30 bytes)
 //!   6 market with an STP group: market's fields | group u16 | action u8 (21 bytes)
+//!   7 iceberg limit: limit's fields | peak u64 | group u16 | action u8  (38 bytes)
+//!     (no STP group is group 0 with action 0)
 //! ```
 //!
-//! Version 2 added tags 5 and 6 (D73). Ungrouped orders still use tags 1 and 2, so a
-//! version 1 file is a valid version 2 file and reads unchanged.
+//! Version 2 added tags 5 and 6 (D73), version 3 tag 7 (D89). Orders without the new
+//! fields still use the old tags, so a version 1 or 2 file is a valid version 3 file and
+//! reads unchanged.
 
 use std::io::{self, Write};
 
@@ -26,7 +29,9 @@ use crate::command::{Command, Stp, StpAction, TimeInForce};
 use crate::types::{OrderId, Price, Qty, Side};
 
 pub const MAGIC: &[u8; 4] = b"LOBJ";
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
+/// The longest command payload (tag 7).
+pub const MAX_PAYLOAD: usize = 38;
 pub const HEADER_LEN: usize = 8;
 /// crc32 + len.
 const RECORD_HEADER_LEN: usize = 6;
@@ -132,7 +137,7 @@ impl<W: Write> JournalWriter<W> {
     }
 
     pub fn append(&mut self, cmd: &Command) -> io::Result<()> {
-        let mut payload = [0u8; 32];
+        let mut payload = [0u8; MAX_PAYLOAD];
         let len = encode_command(cmd, &mut payload);
         let len_bytes = (len as u16).to_le_bytes();
         let mut crc = crc32fast::Hasher::new();
@@ -159,7 +164,7 @@ impl<W: Write> JournalWriter<W> {
 }
 
 /// Encode `cmd` into `buf`, returning the payload length.
-pub fn encode_command(cmd: &Command, buf: &mut [u8; 32]) -> usize {
+pub fn encode_command(cmd: &Command, buf: &mut [u8; MAX_PAYLOAD]) -> usize {
     let mut w = Cursor { buf, pos: 0 };
     match *cmd {
         Command::Limit {
@@ -168,14 +173,27 @@ pub fn encode_command(cmd: &Command, buf: &mut [u8; 32]) -> usize {
             qty,
             price,
             tif,
+            peak,
             stp,
         } => {
-            w.u8(if stp.is_some() { 5 } else { 1 });
+            w.u8(match (peak, stp) {
+                (Some(_), _) => 7,
+                (None, Some(_)) => 5,
+                (None, None) => 1,
+            });
             w.u64(id.0);
             w.u8(side_byte(side));
             w.u64(qty.0);
             w.u64(price.0 as u64);
             w.u8(tif_byte(tif));
+            if let Some(peak) = peak {
+                w.u64(peak.0);
+                if stp.is_none() {
+                    // Tag 7 is fixed width: group 0, action 0 (D89).
+                    w.u16(0);
+                    w.u8(0);
+                }
+            }
             w.stp(stp);
         }
         Command::Market { id, side, qty, stp } => {
@@ -203,13 +221,18 @@ pub fn decode_command(payload: &[u8]) -> Result<Command, &'static str> {
     let mut r = Reader { buf: payload };
     let tag = r.u8()?;
     let cmd = match tag {
-        1 | 5 => Command::Limit {
+        1 | 5 | 7 => Command::Limit {
             id: OrderId(r.u64()?),
             side: byte_side(r.u8()?)?,
             qty: Qty(r.u64()?),
             price: Price(r.u64()? as i64),
             tif: byte_tif(r.u8()?)?,
-            stp: if tag == 5 { Some(r.stp()?) } else { None },
+            peak: if tag == 7 { Some(Qty(r.u64()?)) } else { None },
+            stp: match tag {
+                5 => Some(r.stp()?),
+                7 => r.optional_stp()?,
+                _ => None,
+            },
         },
         2 | 6 => Command::Market {
             id: OrderId(r.u64()?),
@@ -344,7 +367,7 @@ fn byte_tif(b: u8) -> Result<TimeInForce, &'static str> {
 }
 
 struct Cursor<'a> {
-    buf: &'a mut [u8; 32],
+    buf: &'a mut [u8; MAX_PAYLOAD],
     pos: usize,
 }
 
@@ -359,11 +382,15 @@ impl Cursor<'_> {
         self.pos += 8;
     }
 
+    fn u16(&mut self, v: u16) {
+        self.buf[self.pos..self.pos + 2].copy_from_slice(&v.to_le_bytes());
+        self.pos += 2;
+    }
+
     /// Nothing for an ungrouped order: its tag already says so.
     fn stp(&mut self, stp: Option<Stp>) {
         if let Some(Stp { group, action }) = stp {
-            self.buf[self.pos..self.pos + 2].copy_from_slice(&group.get().to_le_bytes());
-            self.pos += 2;
+            self.u16(group.get());
             self.u8(action_byte(action));
         }
     }
@@ -397,6 +424,20 @@ impl Reader<'_> {
             action: byte_action(self.u8()?)?,
         })
     }
+
+    /// Tag 7's fixed-width group and action: both 0 for none, the only spelling of it.
+    fn optional_stp(&mut self) -> Result<Option<Stp>, &'static str> {
+        let group = u16::from_le_bytes([self.u8()?, self.u8()?]);
+        let action = self.u8()?;
+        match (std::num::NonZeroU16::new(group), action) {
+            (None, 0) => Ok(None),
+            (None, _) => Err("stp action without a group"),
+            (Some(group), b) => Ok(Some(Stp {
+                group,
+                action: byte_action(b)?,
+            })),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -414,6 +455,8 @@ mod tests {
             "cancel 18446744073709551615",
             "limit 6 buy 3 100 fok g=65535 stp=cn",
             "market 7 sell 2 g=1 stp=cb",
+            "limit 8 sell 100 50 peak=10",
+            "limit 9 buy 18446744073709551615 -1 post peak=18446744073709551615 g=2 stp=co",
         ]
         .iter()
         .map(|l| l.parse().unwrap())
@@ -450,12 +493,12 @@ mod tests {
 
     #[test]
     fn payload_sizes_match_the_documented_layout() {
-        let mut buf = [0u8; 32];
+        let mut buf = [0u8; MAX_PAYLOAD];
         let sizes: Vec<usize> = sample()
             .iter()
             .map(|c| encode_command(c, &mut buf))
             .collect();
-        assert_eq!(sizes, [27, 27, 27, 27, 18, 25, 9, 30, 21]);
+        assert_eq!(sizes, [27, 27, 27, 27, 18, 25, 9, 30, 21, 38, 38]);
     }
 
     #[test]
@@ -481,8 +524,8 @@ mod tests {
         assert_eq!(read_journal(b"LOB"), Err(JournalError::BadMagic));
         assert_eq!(read_journal(b"XXXX\x01\0\0\0"), Err(JournalError::BadMagic));
         assert_eq!(
-            read_journal(b"LOBJ\x03\0\0\0"),
-            Err(JournalError::UnsupportedVersion(3))
+            read_journal(b"LOBJ\x04\0\0\0"),
+            Err(JournalError::UnsupportedVersion(4))
         );
         assert_eq!(
             read_journal(b"LOBJ\0\0\0\0"),
@@ -491,12 +534,15 @@ mod tests {
     }
 
     #[test]
-    fn reads_a_version_1_file() {
-        // Version 1 had no STP tags: the same records under the old header (D73).
-        let cmds = &sample()[..7];
-        let mut bytes = write(cmds);
-        bytes[4] = 1;
-        assert_eq!(read_journal(&bytes).unwrap().commands, cmds);
+    fn reads_version_1_and_2_files() {
+        // Version 1 had no STP tags and version 2 no iceberg tag: the same records under
+        // the old header (D73, D89).
+        for (version, n) in [(1, 7), (2, 9)] {
+            let cmds = &sample()[..n];
+            let mut bytes = write(cmds);
+            bytes[4] = version;
+            assert_eq!(read_journal(&bytes).unwrap().commands, cmds);
+        }
     }
 
     #[test]
@@ -597,5 +643,15 @@ mod tests {
         market[20] = 0;
         assert_eq!(invalid(&market), "bad stp action byte");
         assert_eq!(invalid(&market[..20]), "record too short");
+        // An iceberg without a group spells it as group 0, action 0, and nothing else.
+        let mut iceberg = [0u8; 38];
+        iceberg[0] = 7;
+        assert!(read_journal(&raw_record(&iceberg)).is_ok());
+        iceberg[37] = 1;
+        assert_eq!(invalid(&iceberg), "stp action without a group");
+        iceberg[35] = 1;
+        iceberg[37] = 9;
+        assert_eq!(invalid(&iceberg), "bad stp action byte");
+        assert_eq!(invalid(&iceberg[..37]), "record too short");
     }
 }

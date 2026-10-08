@@ -37,6 +37,7 @@ use std::time::{Duration, Instant};
 const HELP: &str = "\
 commands:
   limit  <id> <buy|sell> <qty> <price> [gtc|ioc|fok|post]   prices are integer ticks
+         [peak=<n>]                                          iceberg: shows n at a time
   market <id> <buy|sell> <qty>
     either may end in g=<group> stp=<cn|co|cb>               self-trade prevention: cancel
                                                              newest, oldest or both

@@ -168,6 +168,7 @@ impl Ledger {
                 self.close(id, remaining)?;
             }
             Event::Cancelled { id, remaining } => self.close(id, remaining)?,
+            Event::Replenished { .. } => return Err("icebergs come in M15 section 2".into()),
         }
         Ok(())
     }

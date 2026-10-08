@@ -13,6 +13,7 @@
 //! 4 trade      taker | maker | taker_side u8 | qty | price
 //! 5 cancelled  id | remaining
 //! 6 stp-cancelled  id | remaining
+//! 7 replenished    id | qty
 //! ```
 
 use std::time::{Duration, Instant};
@@ -98,6 +99,11 @@ pub fn encode_event(seq: u64, event: &Event, buf: &mut Vec<u8>) {
             u64(buf, id.0);
             u64(buf, remaining.0);
         }
+        Event::Replenished { id, qty } => {
+            buf.push(7);
+            u64(buf, id.0);
+            u64(buf, qty.0);
+        }
     }
 }
 
@@ -109,6 +115,7 @@ fn reason_byte(reason: RejectReason) -> u8 {
         RejectReason::IdNotIncreasing => 4,
         RejectReason::UnknownOrder => 5,
         RejectReason::WouldCross => 6,
+        RejectReason::BadPeak => 7,
     }
 }
 

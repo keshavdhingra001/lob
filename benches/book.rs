@@ -73,6 +73,7 @@ impl<B: OrderBook> Fixture<B> {
             qty: Qty(1),
             price,
             tif: TimeInForce::Gtc,
+            peak: None,
             stp: None,
         };
         (cmd, (id, side, price))
@@ -160,6 +161,7 @@ impl<B: OrderBook> Fixture<B> {
                     // Priced through the whole opposite side: always fills at its best.
                     price: Self::price(side.opposite(), self.levels),
                     tif: TimeInForce::Ioc,
+                    peak: None,
                     stp: None,
                 }
             })

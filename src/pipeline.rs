@@ -1,6 +1,6 @@
 //! The engine as three threads joined by rings (D46): gateway → matching → output.
 //!
-//! The gateway decodes commands from their 32-byte journal encoding and stamps them; the
+//! The gateway decodes commands from their journal encoding and stamps them; the
 //! matching thread applies them to the fast book; the output thread encodes and hashes the
 //! event stream (D17), publishes market data (D40) and records end-to-end latency. Only
 //! the gateway and output threads read a clock (D23). `run_single` does the same work in one
@@ -15,19 +15,19 @@ use crate::book::OrderBook;
 use crate::command::{Command, Event};
 use crate::fast::FastBook;
 use crate::feed::{self, Publisher};
-use crate::journal::{decode_command, encode_command};
+use crate::journal::{decode_command, encode_command, MAX_PAYLOAD};
 use crate::latency::histogram;
 use crate::replay::{encode_event, Fnv64};
 use crate::ring;
 
 /// One command as it arrives: its journal encoding and length.
-pub type Frame = ([u8; 32], usize);
+pub type Frame = ([u8; MAX_PAYLOAD], usize);
 
 pub fn frames(commands: &[Command]) -> Vec<Frame> {
     commands
         .iter()
         .map(|cmd| {
-            let mut buf = [0; 32];
+            let mut buf = [0; MAX_PAYLOAD];
             let len = encode_command(cmd, &mut buf);
             (buf, len)
         })
@@ -284,7 +284,7 @@ mod tests {
             .map(|l| l.parse().unwrap())
             .collect();
         let mut frames = frames(&commands);
-        frames.insert(1, ([9; 32], 3));
+        frames.insert(1, ([9; MAX_PAYLOAD], 3));
         let single = run_single(&frames);
         assert_eq!((single.commands, single.bad_frames), (2, 1));
         assert_eq!((single.events, single.feed_msgs), (3, 3));

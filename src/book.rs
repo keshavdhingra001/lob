@@ -1,7 +1,7 @@
 //! The interface every book implementation provides. M1 adds the reference book
 //! (simple, obviously correct); M4 adds the fast book and tests it against M1.
 
-use crate::command::{Command, Event, RejectReason};
+use crate::command::{Command, Event, RejectReason, TimeInForce};
 use crate::snapshot::BookState;
 use crate::types::{Price, Qty, Side};
 
@@ -52,6 +52,19 @@ impl BookConfig {
         } else {
             Ok(())
         }
+    }
+}
+
+/// D83: an iceberg's peak is positive and below its quantity, and only an order that can
+/// rest (GTC or post-only) has one. Checked after `BookConfig::check`, so `qty` is valid.
+pub fn check_peak(peak: Option<Qty>, qty: Qty, tif: TimeInForce) -> Result<(), RejectReason> {
+    match peak {
+        Some(p)
+            if p.0 == 0 || p >= qty || !matches!(tif, TimeInForce::Gtc | TimeInForce::PostOnly) =>
+        {
+            Err(RejectReason::BadPeak)
+        }
+        _ => Ok(()),
     }
 }
 

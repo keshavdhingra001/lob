@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
-use crate::book::{BookConfig, Level, OrderBook};
+use crate::book::{check_peak, BookConfig, Level, OrderBook};
 use crate::command::{Command, Event, NewOrder, RejectReason, Stp, StpAction, TimeInForce};
 use crate::snapshot::{BookState, RestingOrder};
 use crate::types::{OrderId, Price, Qty, Side};
@@ -109,10 +109,15 @@ impl RefBook {
             qty,
             limit,
             tif,
+            peak,
             stp,
         } = order;
         let check = self.config.check(qty, limit).and_then(|()| {
-            if self.last_id.is_some_and(|last| id <= last) {
+            check_peak(peak, qty, tif)?;
+            // Icebergs rest from section 2 on.
+            if peak.is_some() {
+                Err(RejectReason::BadPeak)
+            } else if self.last_id.is_some_and(|last| id <= last) {
                 Err(RejectReason::IdNotIncreasing)
             } else if tif == TimeInForce::PostOnly
                 && limit.is_some_and(|price| self.would_cross(side, price))

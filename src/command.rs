@@ -7,7 +7,7 @@
 //! Text format (D6), one command per line, used by the REPL and scenario files:
 //!
 //! ```text
-//! limit  <id> <buy|sell> <qty> <price> [gtc|ioc|fok|post] [g=<group> stp=<cn|co|cb>]
+//! limit  <id> <buy|sell> <qty> <price> [gtc|ioc|fok|post] [peak=<n>] [g=<group> stp=<cn|co|cb>]
 //! market <id> <buy|sell> <qty> [g=<group> stp=<cn|co|cb>]
 //! modify <id> <qty> <price>
 //! cancel <id>
@@ -29,6 +29,9 @@ pub enum Command {
         qty: Qty,
         price: Price,
         tif: TimeInForce,
+        /// An iceberg (D83): only `peak` of the resting quantity shows at a time. The book
+        /// checks `0 < peak < qty` and a resting time in force.
+        peak: Option<Qty>,
         stp: Option<Stp>,
     },
     /// Match against the opposite side at any price. Never rests.
@@ -112,6 +115,9 @@ pub enum Event {
     /// The order is done with `remaining` unfilled, cancelled by self-trade prevention
     /// instead of trading with an order of its own group (D70, D73).
     SelfTradeCancelled { id: OrderId, remaining: Qty },
+    /// A resting iceberg's shown quantity ran out and `qty` more of its hidden quantity now
+    /// shows, at the back of its level (D84, D88).
+    Replenished { id: OrderId, qty: Qty },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,6 +131,9 @@ pub enum RejectReason {
     UnknownOrder,
     /// A post-only order (or a modify of one) would have traded.
     WouldCross,
+    /// An iceberg's peak must be positive, below its quantity, and on an order that can
+    /// rest (GTC or post-only) (D83).
+    BadPeak,
 }
 
 /// A limit or market order as both books match it (`limit` is `None` for a market order,
@@ -136,6 +145,7 @@ pub struct NewOrder {
     pub qty: Qty,
     pub limit: Option<Price>,
     pub tif: TimeInForce,
+    pub peak: Option<Qty>,
     pub stp: Option<Stp>,
 }
 
@@ -149,6 +159,7 @@ impl Command {
                 qty,
                 price,
                 tif,
+                peak,
                 stp,
             } => Some(NewOrder {
                 id,
@@ -156,6 +167,7 @@ impl Command {
                 qty,
                 limit: Some(price),
                 tif,
+                peak,
                 stp,
             }),
             Command::Market { id, side, qty, stp } => Some(NewOrder {
@@ -164,6 +176,7 @@ impl Command {
                 qty,
                 limit: None,
                 tif: TimeInForce::Gtc,
+                peak: None,
                 stp,
             }),
             Command::Modify { .. } | Command::Cancel { .. } => None,
@@ -189,7 +202,7 @@ impl FromStr for Command {
         let (&name, args) = tokens.split_first().ok_or(ParseError::Empty)?;
         match name {
             "limit" => {
-                let (args, stp) = split_stp(args)?;
+                let (args, peak, stp) = split_named(args)?;
                 // The time in force is optional, so `limit` takes 4 or 5 arguments.
                 if args.len() != 5 {
                     expect_args("limit", args, 4)?;
@@ -200,11 +213,15 @@ impl FromStr for Command {
                     qty: Qty(parse_num("qty", args[2])?),
                     price: Price(parse_num("price", args[3])?),
                     tif: args.get(4).map_or(Ok(TimeInForce::Gtc), |s| s.parse())?,
+                    peak,
                     stp,
                 })
             }
             "market" => {
-                let (args, stp) = split_stp(args)?;
+                let (args, peak, stp) = split_named(args)?;
+                if peak.is_some() {
+                    return Err(ParseError::PeakNotAllowed);
+                }
                 expect_args("market", args, 3)?;
                 Ok(Command::Market {
                     id: OrderId(parse_num("id", args[0])?),
@@ -259,25 +276,43 @@ impl FromStr for StpAction {
     }
 }
 
-/// Split the optional trailing `g=<group> stp=<action>` off a new order's arguments (D73).
-/// Both or neither, in that order, so a grouped command has exactly one spelling.
-fn split_stp<'a>(args: &'a [&'a str]) -> Result<(&'a [&'a str], Option<Stp>), ParseError> {
-    let Some(at) = args.iter().position(|a| a.contains('=')) else {
-        return Ok((args, None));
-    };
-    let (positional, named) = args.split_at(at);
+/// Split the optional named arguments off a new order's positional ones. They come in
+/// this order: `peak=<n>` (D83), then `g=<group> stp=<action>` together (D73), so each
+/// command has exactly one spelling.
+/// A new order's positional arguments, its peak and its STP pair.
+type Split<'a> = (&'a [&'a str], Option<Qty>, Option<Stp>);
+
+fn split_named<'a>(args: &'a [&'a str]) -> Result<Split<'a>, ParseError> {
+    let at = args
+        .iter()
+        .position(|a| a.contains('='))
+        .unwrap_or(args.len());
+    let (positional, mut named) = args.split_at(at);
+    let mut peak = None;
+    if let Some(value) = named.first().and_then(|a| a.strip_prefix("peak=")) {
+        // A zero or oversized peak parses: whether it's valid depends on the order (D83).
+        peak = Some(Qty(parse_num("peak", value)?));
+        named = &named[1..];
+    }
+    Ok((positional, peak, parse_stp(named)?))
+}
+
+/// `g=<group> stp=<action>`, or nothing.
+fn parse_stp(named: &[&str]) -> Result<Option<Stp>, ParseError> {
+    if named.is_empty() {
+        return Ok(None);
+    }
     let bad = || ParseError::BadStp(named.join(" "));
     let [group, action] = named else {
         return Err(bad());
     };
     let group = group.strip_prefix("g=").ok_or_else(bad)?;
     let action = action.strip_prefix("stp=").ok_or_else(bad)?;
-    let stp = Stp {
+    Ok(Some(Stp {
         // `NonZeroU16` refuses 0: "no group" is spelled by leaving the pair out.
         group: parse_num("group", group)?,
         action: action.parse()?,
-    };
-    Ok((positional, Some(stp)))
+    }))
 }
 
 fn expect_args(command: &'static str, args: &[&str], expected: usize) -> Result<(), ParseError> {
@@ -318,11 +353,15 @@ impl fmt::Display for Command {
                 qty,
                 price,
                 tif,
+                peak,
                 stp,
             } => {
                 write!(f, "limit {id} {side} {qty} {price}")?;
                 if *tif != TimeInForce::Gtc {
                     write!(f, " {tif}")?;
+                }
+                if let Some(peak) = peak {
+                    write!(f, " peak={peak}")?;
                 }
                 write_stp(f, stp)
             }
@@ -382,6 +421,7 @@ impl fmt::Display for Event {
             Event::SelfTradeCancelled { id, remaining } => {
                 write!(f, "stp-cancelled {id} {remaining}")
             }
+            Event::Replenished { id, qty } => write!(f, "replenished {id} {qty}"),
         }
     }
 }
@@ -395,6 +435,7 @@ impl fmt::Display for RejectReason {
             RejectReason::IdNotIncreasing => "id-not-increasing",
             RejectReason::UnknownOrder => "unknown-order",
             RejectReason::WouldCross => "would-cross",
+            RejectReason::BadPeak => "bad-peak",
         })
     }
 }
@@ -417,6 +458,7 @@ mod tests {
                 qty: Qty(100),
                 price: Price(10025),
                 tif: TimeInForce::Gtc,
+                peak: None,
                 stp: None,
             })
         );
@@ -497,6 +539,9 @@ mod tests {
             "limit 5 buy 1 100 g=7 stp=cn",
             "limit 5 buy 1 100 ioc g=65535 stp=co",
             "market 6 sell 2 g=1 stp=cb",
+            "limit 7 buy 100 50 peak=10",
+            "limit 8 sell 100 50 post peak=1 g=2 stp=co",
+            "limit 9 sell 1 50 ioc peak=0",
         ] {
             let cmd = parse(line).unwrap();
             assert_eq!(cmd.to_string(), line);
@@ -575,6 +620,46 @@ mod tests {
     }
 
     #[test]
+    fn peak_comes_before_the_stp_pair() {
+        let named = |line: &str| match parse(line) {
+            Ok(Command::Limit { peak, stp, .. }) => Ok((peak, stp.map(|s| s.group.get()))),
+            Ok(other) => panic!("{other:?}"),
+            Err(e) => Err(e),
+        };
+        assert_eq!(named("limit 1 buy 9 100 peak=3"), Ok((Some(Qty(3)), None)));
+        assert_eq!(
+            named("limit 1 buy 9 100 post peak=3 g=4 stp=cn"),
+            Ok((Some(Qty(3)), Some(4)))
+        );
+        // The book decides whether a peak is valid for the order (D83), so 0 parses.
+        assert_eq!(named("limit 1 buy 9 100 peak=0"), Ok((Some(Qty(0)), None)));
+        assert_eq!(
+            named("limit 1 buy 9 100 g=4 stp=cn peak=3"),
+            Err(ParseError::BadStp("g=4 stp=cn peak=3".into()))
+        );
+        assert_eq!(
+            named("limit 1 buy 9 100 peak=3 peak=3"),
+            Err(ParseError::BadStp("peak=3".into()))
+        );
+        assert_eq!(
+            named("limit 1 buy 9 100 peak=-1"),
+            Err(ParseError::BadNumber {
+                field: "peak",
+                value: "-1".into(),
+            })
+        );
+        assert_eq!(
+            named("limit 1 buy 9 100 peak=3 ioc"),
+            Err(ParseError::BadStp("ioc".into()))
+        );
+        assert_eq!(
+            parse("market 1 buy 9 peak=3"),
+            Err(ParseError::PeakNotAllowed)
+        );
+        assert!(parse("modify 1 9 100 peak=3").is_err());
+    }
+
+    #[test]
     fn rejects_bad_numbers() {
         // Quantities and ids are unsigned, prices are integer ticks: no floats.
         assert_eq!(
@@ -628,6 +713,10 @@ mod tests {
                 id: OrderId(4),
                 remaining: Qty(6),
             },
+            Event::Replenished {
+                id: OrderId(5),
+                qty: Qty(10),
+            },
         ];
         let lines: Vec<String> = events.iter().map(|e| e.to_string()).collect();
         assert_eq!(
@@ -639,6 +728,7 @@ mod tests {
                 "rejected 9 unknown-order",
                 "modified 3 5 99",
                 "stp-cancelled 4 6",
+                "replenished 5 10",
             ]
         );
     }

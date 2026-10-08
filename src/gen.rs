@@ -150,6 +150,7 @@ impl Generator {
             qty: Qty(qty),
             price: Price(price),
             tif,
+            peak: None,
             stp: self.stp(),
         }
     }
@@ -266,6 +267,7 @@ pub fn deep_queue(n: u64, seed: u64) -> Vec<Command> {
             qty: Qty(1),
             price: Price(10_000),
             tif: TimeInForce::Gtc,
+            peak: None,
             stp: None,
         })
         .collect();

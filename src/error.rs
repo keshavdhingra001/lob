@@ -19,6 +19,8 @@ pub enum ParseError {
     BadTimeInForce(String),
     #[error("invalid self-trade prevention `{0}` (expected g=<1-65535> stp=<cn|co|cb>)")]
     BadStp(String),
+    #[error("only a limit order can have a peak")]
+    PeakNotAllowed,
     #[error("invalid {field} `{value}`")]
     BadNumber { field: &'static str, value: String },
 }

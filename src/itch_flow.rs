@@ -165,6 +165,7 @@ impl Translator {
                 qty: Qty(shares),
                 price,
                 tif: TimeInForce::Gtc,
+                peak: None,
                 stp: None,
             },
             out,
@@ -193,6 +194,7 @@ impl Translator {
                 qty: Qty(shares),
                 price,
                 tif: TimeInForce::Ioc,
+                peak: None,
                 stp: None,
             },
             out,
@@ -296,7 +298,7 @@ impl Translator {
                         self.open.remove(&id);
                     }
                 }
-                Event::Accepted { .. } => {}
+                Event::Accepted { .. } | Event::Replenished { .. } => {}
             }
         }
     }

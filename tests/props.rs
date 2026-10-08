@@ -100,6 +100,7 @@ fn session(ops: &[Op]) -> Vec<Command> {
                 qty: Qty(qty),
                 price: Price(price),
                 tif,
+                peak: None,
                 stp,
             },
             Op::Market(id, side, qty, stp) => Command::Market {
