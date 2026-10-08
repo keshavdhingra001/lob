@@ -448,18 +448,16 @@ impl FastBook {
         }
     }
 
-    /// Take an order out of its level's list and free its slot. Removes the level if it
-    /// empties. Returns the node and, for an iceberg, what it kept hidden.
-    fn unlink(&mut self, slot: u32) -> (Node, Option<Reserve>) {
+    /// Take an order out of its level's list and free its slot, and an iceberg's reserve
+    /// with it (read it first if you need it). Removes the level if it empties.
+    fn unlink(&mut self, slot: u32) -> Node {
         let node = self.orders[slot];
-        let mut reserve = None;
         if node.iceberg() {
             let r = self
                 .icebergs
                 .remove(&node.id)
                 .expect("an iceberg has a reserve");
             self.level_hidden[node.level as usize] -= r.hidden;
-            reserve = Some(r);
         }
         if node.prev == NIL {
             self.levels[node.level].head = node.next;
@@ -479,7 +477,7 @@ impl FastBook {
         if empty {
             self.remove_level(node.level);
         }
-        (node, reserve)
+        node
     }
 
     /// Show an iceberg's next slice once its shown quantity has traded away: at the back of
@@ -548,7 +546,7 @@ impl FastBook {
                     if action != StpAction::CancelNewest {
                         // The whole iceberg goes, hidden quantity too (D86).
                         let remaining = Qty(self.open(slot));
-                        let (node, _) = self.unlink(slot);
+                        let node = self.unlink(slot);
                         self.index.remove(&node.id);
                         out.push(Event::SelfTradeCancelled {
                             id: node.id,
@@ -566,7 +564,7 @@ impl FastBook {
                 }
                 let fill = qty.min(maker.qty);
                 maker.qty -= fill;
-                let (maker_id, maker_done, iceberg) = (maker.id, maker.qty == 0, maker.iceberg());
+                let (maker_id, maker_done) = (maker.id, maker.qty == 0);
                 out.push(Event::Trade {
                     taker,
                     maker: maker_id,
@@ -576,7 +574,7 @@ impl FastBook {
                 });
                 qty -= fill;
                 self.levels[level].total -= fill;
-                if maker_done && !(iceberg && self.replenish(slot, out)) {
+                if maker_done && !(self.orders[slot].iceberg() && self.replenish(slot, out)) {
                     // The node's qty is now 0, so `unlink` leaves the level total alone.
                     self.index.remove(&maker_id);
                     self.unlink(slot);
@@ -589,11 +587,9 @@ impl FastBook {
     fn cancel(&mut self, id: OrderId, out: &mut Vec<Event>) {
         match self.index.remove(&id) {
             Some(slot) => {
-                let (node, reserve) = self.unlink(slot);
-                out.push(Event::Cancelled {
-                    id,
-                    remaining: Qty(node.qty + reserve.map_or(0, |r| r.hidden)),
-                });
+                let remaining = Qty(self.open(slot));
+                self.unlink(slot);
+                out.push(Event::Cancelled { id, remaining });
             }
             None => out.push(Event::Rejected {
                 id,
@@ -631,7 +627,8 @@ impl FastBook {
             return reject(out, RejectReason::WouldCross);
         }
         self.index.remove(&id);
-        let (_, reserve) = self.unlink(slot);
+        let reserve = self.reserve(&node);
+        self.unlink(slot);
         out.push(Event::Modified { id, qty, price });
         let stp = node.stp();
         let remaining = self.take(id, lv.side, qty.0, Some(price), stp, out);
