@@ -31,7 +31,7 @@ use crate::replay::ReplayStats;
 use crate::types::{OrderId, Price, Qty, Side};
 
 pub const MAGIC: &[u8; 4] = b"LOBS";
-/// Version 2 added the last covered journal record (D89). A version 1 file is refused,
+/// Version 2 added the last covered journal record (D82). A version 1 file is refused,
 /// so recovery replays from the start of the journal instead: slower, still right.
 pub const VERSION: u32 = 2;
 const HEADER_LEN: usize = 8 + 8 + 8 + 1 + 8 + 5 * 8 + 8 + 13 + 8;
@@ -136,7 +136,7 @@ pub struct Snapshot {
     pub journal_offset: u64,
     /// The last journal record this snapshot covers (the one ending at `journal_offset`),
     /// `None` if it covers none. Recovery checks the journal still has it there: a
-    /// snapshot of another journal is refused, not silently applied (D89).
+    /// snapshot of another journal is refused, not silently applied (D82).
     pub last_record: Option<RecordRef>,
 }
 
@@ -153,7 +153,7 @@ pub enum SnapshotError {
     #[error("invalid snapshot: {0}")]
     Invalid(&'static str),
     /// The journal doesn't hold the record the snapshot says it covers: the snapshot was
-    /// taken from another journal (D89).
+    /// taken from another journal (D82).
     #[error("snapshot belongs to a different journal")]
     WrongJournal,
 }
@@ -283,7 +283,7 @@ impl Snapshot {
     }
 
     /// Whether `journal` (a whole journal file's bytes) still holds this snapshot's last
-    /// record, intact, ending exactly at `journal_offset` (D89).
+    /// record, intact, ending exactly at `journal_offset` (D82).
     pub fn matches_journal(&self, journal: &[u8]) -> bool {
         match self.last_record {
             None => self.journal_offset == journal::HEADER_LEN as u64 && journal.len() >= 8,
@@ -511,6 +511,17 @@ mod tests {
             edited(82, 0).map(|s| s.last_record.unwrap().start),
             Ok(1207 - 0xb7)
         );
+        // No last record is only valid with nothing covered: offset 8.
+        let none = Snapshot {
+            last_record: None,
+            ..snapshot(RefBook::new().state())
+        };
+        assert_eq!(Snapshot::decode(&none.encode()), bad);
+        let none = Snapshot {
+            journal_offset: 8,
+            ..none
+        };
+        assert_eq!(Snapshot::decode(&none.encode()), Ok(none));
     }
 
     #[test]
@@ -544,6 +555,19 @@ mod tests {
         assert_eq!(empty.last_record, None);
         assert!(empty.matches_journal(&header) && empty.matches_journal(&longer));
         assert!(!empty.matches_journal(&header[..7]));
+        // The right record, but the offset says more was covered.
+        let (seven, _) = take(&cmds[..7]);
+        let overreach = Snapshot {
+            journal_offset: seven.journal_offset,
+            ..snap.clone()
+        };
+        assert!(!overreach.matches_journal(&longer));
+        // No record, but an offset past the header (only a hand-built snapshot can say so).
+        let detached = Snapshot {
+            journal_offset: snap.journal_offset,
+            ..empty
+        };
+        assert!(!detached.matches_journal(&longer));
     }
 
     #[test]

@@ -1390,7 +1390,9 @@ Each target ran 10 minutes on 2026-10-08 (all with the text dictionary, which on
   the journal has that record, intact, ending exactly at the snapshot's offset. Otherwise:
   - the record's header is there with another CRC, or the record doesn't end at the offset: **another journal**, so the snapshot is set aside, with a
     warning, and recovery replays from zero;
-  - the journal ends before the record begins, or cuts it short with the same CRC: **the journal lost its tail**, so recovery refuses (D79).
+  - the journal ends before the record begins, or has it under the same CRC but cut short or damaged: **the journal lost what the snapshot covers**,
+    so recovery refuses (D79). (The first version only refused past the journal's end. The mutation check showed the gap: a damaged last record
+    the snapshot covered was set aside and replayed from zero, silently dropping a command the snapshot had already counted.)
     A foreign snapshot past the end of a shorter journal lands here too: the two can't be told apart, and refusing is the safe one.
 - **Also:** a new journal deletes any snapshot at its path before anything is written, so a crash before the first snapshot can't leave a stale one;
   `lob engine` refuses to restart on an input that doesn't start with the journal's commands; `lob recover` and `lob engine` print a **book digest**

@@ -288,6 +288,15 @@ fn a_snapshot_of_another_journal_is_set_aside() {
         recover::<RefBook>(&b50, Some(&stale), CONFIG, |_| {}),
         Err(RecoveryError::SnapshotPastJournal { .. })
     ));
+    // The snapshot's own last record, damaged in place (it's the journal's last record):
+    // the journal lost a command the snapshot covers, so recovery refuses.
+    let mut damaged = a_bytes.clone();
+    let n = damaged.len();
+    damaged[n - 1] ^= 1;
+    assert!(matches!(
+        recover::<RefBook>(&damaged, Some(&stale), CONFIG, |_| {}),
+        Err(RecoveryError::SnapshotPastJournal { .. })
+    ));
     // A journal that holds the snapshot's own prefix still uses it.
     assert!(
         recover::<RefBook>(&a_bytes, Some(&stale), CONFIG, |_| {})
@@ -308,9 +317,25 @@ fn a_new_journal_removes_a_stale_snapshot() {
 
     let (mut engine, _) =
         Engine::<FastBook>::open(&ja, &s, CONFIG, Sync::None, 50, |_| {}).unwrap();
-    engine.process(&a, |_| {}).unwrap();
+    engine.process(&a[..60], |_| {}).unwrap();
+    engine.close().unwrap();
+    // A restart with nothing new, then a snapshot straight away: it must still name the
+    // journal's last record, which the writer only knows from recovery.
+    let (mut engine, _) =
+        Engine::<FastBook>::open(&ja, &s, CONFIG, Sync::None, 50, |_| {}).unwrap();
+    engine.snapshot().unwrap();
+    drop(engine);
+    let (mut engine, opened) =
+        Engine::<FastBook>::open(&ja, &s, CONFIG, Sync::None, 50, |_| {}).unwrap();
+    assert!(opened.from_snapshot && opened.bad_snapshot.is_none());
+    engine.process(&a[60..], |_| {}).unwrap();
     engine.snapshot().unwrap();
     engine.close().unwrap();
+    let r = recover_files::<RefBook>(&ja, &s, CONFIG, |_| {}).unwrap();
+    assert!(
+        r.from_snapshot && r.replayed == 0,
+        "the snapshot is used, not set aside"
+    );
     assert!(s.exists());
 
     // A new journal at another path, the same snapshot path, and a crash before the

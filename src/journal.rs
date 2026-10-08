@@ -60,7 +60,7 @@ pub struct Journal {
 
 /// Where a record starts and the CRC it carries: enough to recognise it again. A snapshot
 /// names the last record it covers this way, so recovery can tell its journal from
-/// another one (D89).
+/// another one (D82).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RecordRef {
     pub start: u64,

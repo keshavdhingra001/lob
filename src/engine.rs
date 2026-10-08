@@ -82,7 +82,7 @@ impl<B: OrderBook> Engine<B> {
         } else {
             // A file shorter than the header is a crash during creation: start over. A
             // snapshot left at `snapshot` belongs to some other journal: remove it before
-            // anything is written, so no later recovery can apply it to this one (D89).
+            // anything is written, so no later recovery can apply it to this one (D82).
             match fs::remove_file(snapshot) {
                 Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
                 _ => {}

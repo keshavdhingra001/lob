@@ -12,7 +12,7 @@
 //! - A snapshot pointing past the end of the journal refuses: it describes commands the
 //!   journal lost, so recovering would contradict what was already published.
 //! - A snapshot of another journal (its last record isn't in this one) is set aside, and
-//!   recovery starts from zero (D89).
+//!   recovery starts from zero (D82).
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -43,7 +43,7 @@ pub struct Recovered<B> {
     pub recorder: Recorder,
     /// Where the journal's valid records end: the next append goes here.
     pub journal_end: u64,
-    /// The last valid record, for the writer that appends after it (D89).
+    /// The last valid record, for the writer that appends after it (D82).
     pub last_record: Option<RecordRef>,
     /// Records replayed after the snapshot (all of them without one).
     pub replayed: u64,
@@ -59,9 +59,9 @@ pub struct Recovered<B> {
 /// go to `sink`. `config` is the engine's; a snapshot taken under other rules is refused.
 ///
 /// A snapshot whose last record isn't in this journal is set aside, with a warning, and
-/// recovery starts from zero (D89): it belongs to another journal. If that record lies
-/// past the end of the journal instead, the journal lost commands the snapshot covers,
-/// and recovery refuses (D79).
+/// recovery starts from zero (D82): it belongs to another journal. If that record is
+/// missing past the end of the journal, or there but cut short or damaged, the journal
+/// lost commands the snapshot covers, and recovery refuses (D79).
 pub fn recover<B: OrderBook>(
     journal: &[u8],
     snapshot: Option<&Snapshot>,
@@ -79,7 +79,7 @@ pub fn recover<B: OrderBook>(
                 Ok(book) => start = Some((book, snap)),
                 Err(reason) => bad_snapshot = Some(SnapshotError::Invalid(reason)),
             }
-        } else if snap.journal_offset > journal.len() as u64 && lost_tail(snap, journal) {
+        } else if lost_tail(snap, journal) {
             return Err(RecoveryError::SnapshotPastJournal {
                 offset: snap.journal_offset,
                 len: journal.len() as u64,
@@ -129,7 +129,8 @@ pub fn recover<B: OrderBook>(
 }
 
 /// Whether the snapshot's last record is missing because the journal ends before it, or
-/// is cut short where it still begins with the same checksum: the journal lost its tail.
+/// begins with the same checksum but is cut short or damaged: this journal lost what the
+/// snapshot covers (D79), as opposed to being another journal (D82).
 fn lost_tail(snap: &Snapshot, journal: &[u8]) -> bool {
     let Some(want) = snap.last_record else {
         return false;
