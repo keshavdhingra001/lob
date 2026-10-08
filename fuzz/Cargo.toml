@@ -50,3 +50,10 @@ path = "fuzz_targets/book_snapshot.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "books"
+path = "fuzz_targets/books.rs"
+test = false
+doc = false
+bench = false

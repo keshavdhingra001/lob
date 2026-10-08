@@ -87,6 +87,23 @@ fn golden_digest() {
     assert_eq!(stats.digest, 0xf0cd_0c4b_e21b_0c27);
 }
 
+/// The same, for a flow where a third of the big passive orders are icebergs (D89): it pins
+/// the `replenished` event's encoding and every iceberg rule along with it.
+#[test]
+fn golden_iceberg_digest() {
+    let config = GenConfig {
+        iceberg_pct: 33,
+        ..GenConfig::with_seed(1)
+    };
+    let commands: Vec<Command> = Generator::new(config).take(20_000).collect();
+    let (stats, _) = event_bytes(&commands);
+    assert_eq!(
+        (stats.commands, stats.events, stats.trades, stats.rejects),
+        (20_000, 33_618, 10_659, 5_352)
+    );
+    assert_eq!(stats.digest, 0x4249_c081_da9a_582d);
+}
+
 /// The grouped flow (D67) really attempts self-trades, and every action shows up as the
 /// cancels D68 allows it, while the ledger checks each one and quantity is conserved.
 #[test]
