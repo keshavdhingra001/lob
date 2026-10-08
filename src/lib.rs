@@ -24,6 +24,7 @@ pub mod replay;
 pub mod ring;
 pub mod rng;
 pub mod scenario;
+pub mod snapshot;
 pub mod types;
 
 pub use book::{BookConfig, Level, OrderBook};

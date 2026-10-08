@@ -149,6 +149,8 @@ proptest! {
             prop_assert_eq!(ledger.observe(cmd, &want, &reference), Ok(()));
         }
         prop_assert_eq!(depth(&fast), depth(&reference));
+        // Same logical book, order by order (D74), so either one's snapshot fits the other.
+        prop_assert_eq!(fast.state(), reference.state());
     }
 
     /// For any session and any pattern of lost messages, a consumer that gets a heartbeat

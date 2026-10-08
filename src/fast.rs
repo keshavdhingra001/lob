@@ -19,6 +19,7 @@ use crate::book::{BookConfig, Level, OrderBook};
 use crate::command::{Command, Event, NewOrder, RejectReason, Stp, StpAction, TimeInForce};
 use crate::hash::IdBuildHasher;
 use crate::ladder::Ladder;
+use crate::snapshot::{BookState, RestingOrder};
 use crate::types::{OrderId, Price, Qty, Side};
 
 /// "No index": the end of a list, or no best level.
@@ -637,6 +638,44 @@ impl OrderBook for FastBook {
             return Err("level slab and price ladders disagree".to_string());
         }
         Ok(())
+    }
+
+    fn state(&self) -> BookState {
+        let mut orders = Vec::with_capacity(self.index.len());
+        for side in [Side::Buy, Side::Sell] {
+            self.visit_best_first(side, |price, l| {
+                let mut slot = self.levels[l].head;
+                while slot != NIL {
+                    let node = &self.orders[slot];
+                    orders.push(RestingOrder {
+                        id: node.id,
+                        side,
+                        price,
+                        qty: Qty(node.qty),
+                        post_only: node.post_only,
+                        stp: node.stp(),
+                    });
+                    slot = node.next;
+                }
+                true
+            });
+        }
+        BookState {
+            config: self.config,
+            last_id: self.last_id,
+            orders,
+        }
+    }
+
+    fn from_state(state: &BookState) -> Result<Self, &'static str> {
+        state.validate()?;
+        let mut book = FastBook::with_capacity(state.config, state.orders.len());
+        book.last_id = state.last_id;
+        // Priority order, so each order joins the tail of its level as it once did.
+        for o in &state.orders {
+            book.rest(o.id, o.side, o.price, o.qty.0, o.post_only, o.stp);
+        }
+        Ok(book)
     }
 }
 

@@ -216,14 +216,14 @@ pub fn read_journal(bytes: &[u8]) -> Result<Journal, JournalError> {
     })
 }
 
-fn side_byte(side: Side) -> u8 {
+pub(crate) fn side_byte(side: Side) -> u8 {
     match side {
         Side::Buy => 0,
         Side::Sell => 1,
     }
 }
 
-fn byte_side(b: u8) -> Result<Side, &'static str> {
+pub(crate) fn byte_side(b: u8) -> Result<Side, &'static str> {
     match b {
         0 => Ok(Side::Buy),
         1 => Ok(Side::Sell),
@@ -231,7 +231,7 @@ fn byte_side(b: u8) -> Result<Side, &'static str> {
     }
 }
 
-fn action_byte(action: StpAction) -> u8 {
+pub(crate) fn action_byte(action: StpAction) -> u8 {
     match action {
         StpAction::CancelNewest => 1,
         StpAction::CancelOldest => 2,
@@ -239,7 +239,7 @@ fn action_byte(action: StpAction) -> u8 {
     }
 }
 
-fn byte_action(b: u8) -> Result<StpAction, &'static str> {
+pub(crate) fn byte_action(b: u8) -> Result<StpAction, &'static str> {
     match b {
         1 => Ok(StpAction::CancelNewest),
         2 => Ok(StpAction::CancelOldest),

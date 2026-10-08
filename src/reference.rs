@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use crate::book::{BookConfig, Level, OrderBook};
 use crate::command::{Command, Event, NewOrder, RejectReason, Stp, StpAction, TimeInForce};
+use crate::snapshot::{BookState, RestingOrder};
 use crate::types::{OrderId, Price, Qty, Side};
 
 #[derive(Clone, Copy, Debug)]
@@ -390,6 +391,40 @@ impl OrderBook for RefBook {
             ));
         }
         Ok(())
+    }
+
+    fn state(&self) -> BookState {
+        let bids = self.bids.iter().rev().map(|l| (Side::Buy, l));
+        let asks = self.asks.iter().map(|l| (Side::Sell, l));
+        let orders = bids
+            .chain(asks)
+            .flat_map(|(side, (&price, queue))| {
+                queue.iter().map(move |o| RestingOrder {
+                    id: o.id,
+                    side,
+                    price,
+                    qty: o.qty,
+                    post_only: o.post_only,
+                    stp: o.stp,
+                })
+            })
+            .collect();
+        BookState {
+            config: self.config,
+            last_id: self.last_id,
+            orders,
+        }
+    }
+
+    fn from_state(state: &BookState) -> Result<Self, &'static str> {
+        state.validate()?;
+        let mut book = RefBook::with_config(state.config);
+        book.last_id = state.last_id;
+        // Validated order is priority order, so appending rebuilds each queue as it was.
+        for o in &state.orders {
+            book.rest(o.id, o.side, o.price, o.qty, o.post_only, o.stp);
+        }
+        Ok(book)
     }
 }
 

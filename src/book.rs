@@ -2,6 +2,7 @@
 //! (simple, obviously correct); M4 adds the fast book and tests it against M1.
 
 use crate::command::{Command, Event, RejectReason};
+use crate::snapshot::BookState;
 use crate::types::{Price, Qty, Side};
 
 /// Aggregated view of one price level, for depth queries and market data.
@@ -86,6 +87,16 @@ pub trait OrderBook {
     /// zero-quantity orders, and lookup structures agree with the queues. Tests call it
     /// after every command. It's O(book size), so it never runs on the hot path.
     fn check_invariants(&self) -> Result<(), String>;
+
+    /// The logical book, for a snapshot (D74): what any book needs to carry on exactly
+    /// where this one is.
+    fn state(&self) -> BookState;
+
+    /// A book that behaves exactly like the one `state` was taken from. Refuses a state
+    /// no session could have produced (`BookState::validate`).
+    fn from_state(state: &BookState) -> Result<Self, &'static str>
+    where
+        Self: Sized;
 
     fn best_bid(&self) -> Option<Level> {
         self.depth(Side::Buy, 1).first().copied()
