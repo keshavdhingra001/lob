@@ -40,7 +40,7 @@ so later ones sometimes replace earlier ones, and each replaced entry says what 
 | Fast book | D19–D21, D31, D33, D34 |
 | No allocation on the hot path | D5, D32 |
 | Journal, replay, digest | D15–D17 |
-| Crash recovery: snapshots, group commit | D74–D81, M14 results |
+| Crash recovery: snapshots, group commit | D74–D82, M14 results |
 | Test oracles and generated flow | D10, D13, D18, D22, D49–D52, D64–D66 |
 | Latency and profiling | D23–D29, D48, D55, D60 |
 | Real market data (NASDAQ ITCH 5.0) | D35–D39, D54 |
@@ -1300,7 +1300,8 @@ Each target ran 10 minutes on 2026-10-08 (all with the text dictionary, which on
 - `Recorder` (`replay.rs`) is the resumable part of `replay`: counters, digest and event encoding, with the book passed in.
 
 ### D76: Snapshot file: whole or not at all
-- **Format:** `"LOBS"`, version 1, a fixed header (rules, last id, counters, journal offset, order count), 29-byte order records, and a CRC32 over everything.
+- **Format:** `"LOBS"`, a fixed header (rules, last id, counters, journal offset, the last journal record covered (D82), order count), 29-byte order records,
+  and a CRC32 over everything. Version 2 (version 1 had no record reference and is refused, so recovery replays from zero).
   One spelling per value (no group is group 0 with action 0), so accepted bytes are canonical (D50).
 - **Write:** to `<path>.tmp`, `fsync`, `rename` over the old snapshot, `fsync` the directory. A crash leaves the old snapshot or the new one.
   Only the latest is kept.
@@ -1327,7 +1328,9 @@ Each target ran 10 minutes on 2026-10-08 (all with the text dictionary, which on
 - **Torn tail** (a crash mid-append): cut off, and the cut made durable, before anything is appended. Otherwise the next record would land after
   garbage, and the file would read as damaged (D16) from then on.
 - **Damage before the last record:** refuse (D16). **A snapshot past the end of the journal:** refuse. It describes commands the journal lost.
-- **A journal shorter than its header** is a crash during creation: the engine starts a new one.
+- **A snapshot of another journal:** set aside with a warning, and recovery replays from zero (D82).
+- **A journal shorter than its header** is a crash during creation: the engine starts a new one, and deletes any snapshot at its snapshot path first (D82).
+- **A restart checks its input:** the journal must hold the start of the input file, or the engine refuses (it would otherwise carry on with another session's commands).
 
 ### D80: One journal, never truncated
 - The snapshot only saves time; the journal stays the full history (replay from zero always works). Rotating it into segments and deleting the ones
@@ -1338,8 +1341,9 @@ Each target ran 10 minutes on 2026-10-08 (all with the text dictionary, which on
   record boundary after the snapshot and at one random byte inside every record. For each: recover (both books), run the commands the journal lost,
   and require the uninterrupted run's event bytes, counters, digest and book state.
 - **A real crash** (`tests/crash.rs`): the `lob` binary (fsync per 8 commands, a snapshot every 50), killed with SIGKILL 7 times at different moments.
-  After each kill, `lob recover` must report the digest of exactly the commands the journal kept, and never fewer than the last round kept. Then a restart
-  runs to the end; its digest and journal bytes equal an uninterrupted run's, and recovering once more gives the same digest.
+  After each kill, `lob recover` must report the event digest **and the book digest** of exactly the commands the journal kept, and never fewer commands than
+  the last round kept. Then a restart runs to the end; its digests and journal bytes equal an uninterrupted run's, and recovering once more gives the same digests.
+  (The event digest alone isn't enough: two sessions can emit identical events and hold different books. D82 is the case that showed it.)
 - **Codecs:** the snapshot property (accepted bytes are canonical, restore into both books, invariants hold), a fuzz target `book_snapshot`
   (it re-seals the CRC so the fuzzer gets past it), and every-cut and every-bit-flip tests.
 - **What these can't prove:** that `fsync` is called where it must be. A killed process loses nothing in the page cache; only a power cut (or a
@@ -1376,3 +1380,22 @@ Each target ran 10 minutes on 2026-10-08 (all with the text dictionary, which on
   write-on-the-matching-thread is fine, and a background writer would remove fsync time, not encoding time.
 - **Recovery** of the 2M-command journal (50 MB): 18 ms from the last snapshot (nothing after it to replay) against 246–249 ms replaying from zero
   (about 8M commands/s). The snapshot's value grows with the journal: replay cost is linear in history, the snapshot's is linear in the live book.
+
+### D82: A snapshot names the journal record it ends at (M14 review)
+- **The bug (found reviewing M14, after it was pushed):** a snapshot didn't say which journal it came from. Recovery only checked that its offset
+  wasn't past the journal's end, and a new journal left an old snapshot in place. A snapshot of session A (100 bids) recovered session B's journal
+  (200 asks, all records the same size, so A's offset fell on one of B's record boundaries). The **event digest still matched**: both sessions start with
+  `accepted 1..100`, byte for byte. The book didn't, and the next command, `market 201 sell 1`, traded against a bid B never had.
+- **What:** the snapshot (format version 2) records its last covered record: where it starts and the CRC it carries. Recovery uses the snapshot only if
+  the journal has that record, intact, ending exactly at the snapshot's offset. Otherwise:
+  - the record's header is there with another CRC, or the record doesn't end at the offset: **another journal**, so the snapshot is set aside, with a
+    warning, and recovery replays from zero;
+  - the journal ends before the record begins, or cuts it short with the same CRC: **the journal lost its tail**, so recovery refuses (D79).
+    A foreign snapshot past the end of a shorter journal lands here too: the two can't be told apart, and refusing is the safe one.
+- **Also:** a new journal deletes any snapshot at its path before anything is written, so a crash before the first snapshot can't leave a stale one;
+  `lob engine` refuses to restart on an input that doesn't start with the journal's commands; `lob recover` and `lob engine` print a **book digest**
+  (FNV-1a of the state's canonical bytes), and the SIGKILL test compares it.
+- **Alternatives:** a random session id in the journal header (the engine may not use randomness, D4, and the id would have to come from outside);
+  hashing the whole journal prefix into the snapshot (proves the most, but checking it costs a full read, which is what the snapshot saves).
+  A 32-bit CRC at a known offset can collide by chance (about 1 in 4 billion for unrelated journals), which is far below the operator mistakes it guards against.
+- **Tests:** the reproduction (both directions, and the ambiguous case), a stale snapshot through the engine, an input that doesn't match, and decode checks for the new field.

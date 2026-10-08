@@ -44,7 +44,7 @@ that part of the tail is the machine (interrupts, preemption), not the code. [Mo
   FOK stays exact with it, and the fast book's order still fits in 32 bytes (D67–D73).
 - **Crash recovery:** `lob engine` journals each batch, fsyncs it once (group commit), and only then applies it, so no event is ever sent
   for a command a crash could lose. It writes atomic snapshots of the logical book. After a crash, the snapshot plus the journal after it
-  give the same digest as a run that never stopped. That's checked at every cut point of the journal, and against the real binary killed with SIGKILL (D74–D81).
+  give the same digest as a run that never stopped. That's checked at every cut point of the journal, and against the real binary killed with SIGKILL (D74–D82).
 
 ## How correctness is checked
 
@@ -156,4 +156,4 @@ no risk checks beyond a fat-finger quantity limit, no replica to fail over to.
 - [x] **M13** Self-trade prevention: STP groups, three actions, FOK and modify rules, journal v2
 - [x] **M14** Crash recovery: logical-book snapshots, group commit, recovery proved by digest at every crash point
 
-Each milestone's decisions are in [DESIGN.md](DESIGN.md), numbered D1–D81.
+Each milestone's decisions are in [DESIGN.md](DESIGN.md), numbered D1–D82.
