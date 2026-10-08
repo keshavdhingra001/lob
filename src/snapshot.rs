@@ -11,13 +11,15 @@
 //!          tick_size i64 | max_qty u64 | has_last_id u8 | last_id u64
 //!          commands u64 | events u64 | trades u64 | rejects u64 | digest u64
 //!          journal_offset u64 | has_last u8 | last_start u64 | last_crc u32 | orders u64
-//! order:   id u64 | side u8 | price i64 | qty u64 | post_only u8 | group u16 | action u8   (29 bytes)
+//! order:   id u64 | side u8 | price i64 | qty u64 | post_only u8 | group u16 | action u8
+//!          | peak u64 | hidden u64                                                    (45 bytes)
 //!          bids best first, then asks best first; oldest first within a price
 //! trailer: crc32 u32 over everything before it
 //! ```
 //!
 //! Every value has one spelling (no group is group 0 with action 0; no last id is flag 0
-//! with id 0), so an accepted file re-encodes to the same bytes.
+//! with id 0; an ordinary order has peak 0 and hidden 0), so an accepted file re-encodes
+//! to the same bytes.
 
 use std::collections::HashSet;
 use std::num::NonZeroU16;
@@ -31,11 +33,12 @@ use crate::replay::ReplayStats;
 use crate::types::{OrderId, Price, Qty, Side};
 
 pub const MAGIC: &[u8; 4] = b"LOBS";
-/// Version 2 added the last covered journal record (D82). A version 1 file is refused,
-/// so recovery replays from the start of the journal instead: slower, still right.
-pub const VERSION: u32 = 2;
+/// Version 2 added the last covered journal record (D82), version 3 icebergs (D88). An
+/// older file is refused, so recovery replays from the start of the journal instead:
+/// slower, still right.
+pub const VERSION: u32 = 3;
 const HEADER_LEN: usize = 8 + 8 + 8 + 1 + 8 + 5 * 8 + 8 + 13 + 8;
-const ORDER_LEN: usize = 29;
+const ORDER_LEN: usize = 45;
 const TRAILER_LEN: usize = 4;
 
 /// One resting order, as a snapshot records it.
@@ -44,8 +47,12 @@ pub struct RestingOrder {
     pub id: OrderId,
     pub side: Side,
     pub price: Price,
-    /// Open quantity now, after any fills and in-place reductions.
+    /// Shown open quantity now, after any fills and in-place reductions.
     pub qty: Qty,
+    /// An iceberg's slice size (D83), `None` for an ordinary order.
+    pub peak: Option<Qty>,
+    /// An iceberg's open quantity not shown yet; 0 for an ordinary order.
+    pub hidden: Qty,
     pub post_only: bool,
     pub stp: Option<Stp>,
 }
@@ -88,11 +95,20 @@ impl BookState {
         let mut prev: Option<&RestingOrder> = None;
         let mut best_bid = None;
         for o in &self.orders {
-            if o.qty.0 == 0 || o.qty.0 > config.max_qty {
+            let open = o.qty.0.checked_add(o.hidden.0);
+            if o.qty.0 == 0 || open.is_none_or(|open| open > config.max_qty) {
                 return Err("resting quantity out of range");
             }
+            // A peak is below the order's original quantity, so below `max_qty` (D83).
+            let iceberg_ok = match o.peak {
+                None => o.hidden.0 == 0,
+                Some(peak) => o.qty <= peak && peak.0 < config.max_qty,
+            };
+            if !iceberg_ok {
+                return Err("bad iceberg");
+            }
             total = total
-                .checked_add(o.qty.0)
+                .checked_add(o.qty.0 + o.hidden.0)
                 .ok_or("resting quantity overflows")?;
             if o.price.0 % config.tick_size != 0 {
                 return Err("resting price off the tick grid");
@@ -186,6 +202,8 @@ impl Snapshot {
             buf.push(o.post_only as u8);
             buf.extend_from_slice(&o.stp.map_or(0, |s| s.group.get()).to_le_bytes());
             buf.push(o.stp.map_or(0, |s| action_byte(s.action)));
+            u64(&mut buf, o.peak.map_or(0, |p| p.0));
+            u64(&mut buf, o.hidden.0);
         }
         let crc = crc32fast::hash(&buf);
         buf.extend_from_slice(&crc.to_le_bytes());
@@ -259,11 +277,16 @@ impl Snapshot {
                 }),
                 (None, _) => return Err(invalid("stp action without a group")),
             };
+            // Peak 0 is "not an iceberg"; `validate` refuses hidden quantity without a peak.
+            let peak = Some(Qty(r.u64())).filter(|p| p.0 > 0);
+            let hidden = Qty(r.u64());
             orders.push(RestingOrder {
                 id,
                 side,
                 price,
                 qty,
+                peak,
+                hidden,
                 post_only,
                 stp,
             });
@@ -332,6 +355,8 @@ mod tests {
         "limit 6 sell 2 102",
         "modify 1 8 100",
         "market 7 sell 1",
+        "limit 8 sell 30 110 peak=4",
+        "modify 8 25 110",
         "limit 9 sell 3 -4",
         "cancel 9",
     ];
@@ -376,6 +401,8 @@ mod tests {
             side,
             price: Price(price),
             qty: Qty(1),
+            peak: None,
+            hidden: Qty(0),
             post_only: false,
             stp: None,
         }
@@ -386,8 +413,9 @@ mod tests {
         let r = book::<RefBook>(SESSION).state();
         assert_eq!(r, book::<FastBook>(SESSION).state());
         let ids: Vec<u64> = r.orders.iter().map(|o| o.id.0).collect();
-        // Bids 100 (1 then 2: 1 was reduced in place and kept its spot), 99; asks 102 (5, 6), 103.
-        assert_eq!(ids, [1, 2, 3, 5, 6, 4]);
+        // Bids 100 (1 then 2: 1 was reduced in place and kept its spot), 99; asks 102 (5, 6),
+        // 103, 110.
+        assert_eq!(ids, [1, 2, 3, 5, 6, 4, 8]);
         assert_eq!(r.last_id, Some(OrderId(9)));
         assert!(r.orders[1].post_only);
         // Order 1 was reduced to 8 in place; the market sell took 1 and sell 9 (at -4) took 3.
@@ -395,6 +423,9 @@ mod tests {
             (r.orders[0].qty, r.orders[3].stp.unwrap().group.get()),
             (Qty(4), 65535)
         );
+        // The iceberg's cut came out of its hidden quantity (D88).
+        assert_eq!((r.orders[6].qty, r.orders[6].hidden), (Qty(4), Qty(21)));
+        assert_eq!(r.orders[6].peak, Some(Qty(4)));
     }
 
     #[test]
@@ -405,6 +436,7 @@ mod tests {
             "modify 2 9 101",
             "market 10 sell 30 g=3 stp=co",
             "limit 11 sell 1 100 post",
+            "market 12 buy 40",
         ]);
         let run = |b: &mut dyn OrderBook| -> Vec<Event> {
             let mut out = Vec::new();
@@ -427,13 +459,17 @@ mod tests {
             id: OrderId(9),
             reason: crate::RejectReason::IdNotIncreasing
         }));
+        assert!(expected.contains(&Event::Replenished {
+            id: OrderId(8),
+            qty: Qty(4)
+        }));
     }
 
     #[test]
     fn encoding_round_trips_and_has_the_documented_size() {
         let snap = snapshot(book::<FastBook>(SESSION).state());
         let bytes = snap.encode();
-        assert_eq!(bytes.len(), 102 + 6 * 29 + 4);
+        assert_eq!(bytes.len(), 102 + 7 * 45 + 4);
         assert_eq!(Snapshot::decode(&bytes), Ok(snap));
         let empty = snapshot(RefBook::new().state());
         assert_eq!(Snapshot::decode(&empty.encode()), Ok(empty));
@@ -472,6 +508,11 @@ mod tests {
         assert_eq!(
             edited(first + 25, 2),
             Err(SnapshotError::Invalid("bad post-only byte"))
+        );
+        // Hidden quantity without a peak (peak at 29, hidden at 37).
+        assert_eq!(
+            edited(first + 37, 1),
+            Err(SnapshotError::Invalid("bad iceberg"))
         );
         // No last id with a nonzero id: flag at 24, id at 25.
         let mut b = snapshot(RefBook::new().state()).encode();
@@ -635,6 +676,21 @@ mod tests {
             ..order(1, Buy, 2)
         };
         assert_eq!(check(9, vec![empty]), Err("resting quantity out of range"));
+        let iceberg = |qty, peak: Option<u64>, hidden| RestingOrder {
+            qty: Qty(qty),
+            peak: peak.map(Qty),
+            hidden: Qty(hidden),
+            ..order(1, Buy, 2)
+        };
+        assert_eq!(check(9, vec![iceberg(2, Some(2), 3)]), Ok(()));
+        assert_eq!(check(9, vec![iceberg(1, Some(4), 0)]), Ok(()));
+        assert_eq!(
+            check(9, vec![iceberg(2, Some(2), 4)]),
+            Err("resting quantity out of range")
+        );
+        assert_eq!(check(9, vec![iceberg(3, Some(2), 0)]), Err("bad iceberg"));
+        assert_eq!(check(9, vec![iceberg(1, Some(5), 0)]), Err("bad iceberg"));
+        assert_eq!(check(9, vec![iceberg(1, None, 1)]), Err("bad iceberg"));
         let huge = BookState {
             config: BookConfig {
                 tick_size: 1,

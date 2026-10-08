@@ -1,0 +1,155 @@
+# Iceberg orders (D83-D85, D88). Only the peak shows. When the shown slice is used up,
+# the next one shows at the back of its level, and matching may reach it again.
+# `book` prints shown quantity only, as market data does.
+
+# Entry: 0 < peak < qty, on an order that can rest (GTC or post-only).
+limit 1 sell 10 100 peak=0
+> rejected 1 bad-peak
+limit 1 sell 10 100 peak=10
+> rejected 1 bad-peak
+limit 1 sell 10 100 ioc peak=5
+> rejected 1 bad-peak
+limit 1 sell 10 100 fok peak=5
+> rejected 1 bad-peak
+limit 1 sell 0 100 peak=5
+> rejected 1 zero-qty
+
+# 30 to sell, 10 at a time. Order 2 arrives later but sits behind only the first slice.
+limit 1 sell 30 100 peak=10
+> accepted 1
+limit 2 sell 5 100
+> accepted 2
+book
+> ask 100 15 (2)
+
+# The first slice trades, the next one goes behind order 2 (D84).
+limit 3 buy 12 100
+> accepted 3
+> trade 3 1 buy 10 100
+> replenished 1 10
+> trade 3 2 buy 2 100
+book
+> ask 100 13 (2)
+
+# One taker can take several slices in one sweep (D85).
+market 4 buy 30
+> accepted 4
+> trade 4 2 buy 3 100
+> trade 4 1 buy 10 100
+> replenished 1 10
+> trade 4 1 buy 10 100
+> cancelled 4 7
+book
+> empty
+
+# The last slice is whatever is left.
+limit 5 buy 25 99 peak=10
+> accepted 5
+book
+> bid 99 10 (1)
+market 6 sell 12
+> accepted 6
+> trade 6 5 sell 10 99
+> replenished 5 10
+> trade 6 5 sell 2 99
+book
+> bid 99 8 (1)
+market 7 sell 13
+> accepted 7
+> trade 7 5 sell 8 99
+> replenished 5 5
+> trade 7 5 sell 5 99
+book
+> empty
+
+# A cancel reports shown and hidden quantity together.
+limit 8 buy 25 99 peak=10
+> accepted 8
+cancel 8
+> cancelled 8 25
+
+# An incoming iceberg trades its whole size, then rests what's left behind its peak.
+limit 9 sell 4 100
+> accepted 9
+limit 10 sell 4 101
+> accepted 10
+limit 11 buy 20 101 peak=5
+> accepted 11
+> trade 11 9 buy 4 100
+> trade 11 10 buy 4 101
+book
+> bid 101 5 (1)
+
+# Post-only icebergs are allowed.
+limit 12 sell 10 101 post peak=2
+> rejected 12 would-cross
+limit 12 sell 10 102 post peak=2
+> accepted 12
+book
+> ask 102 2 (1)
+> bid 101 5 (1)
+
+# Modify sets the whole open quantity (D88).
+config 1 1000000
+limit 1 buy 20 100 peak=5
+> accepted 1
+limit 2 buy 3 100
+> accepted 2
+book
+> bid 100 8 (2)
+
+# A decrease comes out of the hidden quantity first, and keeps the order's place.
+modify 1 12 100
+> modified 1 12 100
+book
+> bid 100 8 (2)
+modify 1 3 100
+> modified 1 3 100
+book
+> bid 100 6 (2)
+
+# An increase loses priority: the order rests again at the back, showing its peak.
+modify 1 20 100
+> modified 1 20 100
+book
+> bid 100 8 (2)
+market 3 sell 6
+> accepted 3
+> trade 3 2 sell 3 100
+> trade 3 1 sell 3 100
+book
+> bid 100 2 (1)
+
+# So does a new price, and the order can trade on the way with its whole size.
+limit 4 sell 4 101
+> accepted 4
+modify 1 17 101
+> modified 1 17 101
+> trade 1 4 buy 4 101
+book
+> bid 101 5 (1)
+
+# Below the peak, everything shows.
+modify 1 3 102
+> modified 1 3 102
+book
+> bid 102 3 (1)
+
+# A FOK order counts hidden quantity: matching will reach all of it (D86).
+config 1 1000000
+limit 1 sell 20 100 peak=5
+> accepted 1
+limit 2 buy 21 100 fok
+> accepted 2
+> cancelled 2 21
+limit 3 buy 20 100 fok
+> accepted 3
+> trade 3 1 buy 5 100
+> replenished 1 5
+> trade 3 1 buy 5 100
+> replenished 1 5
+> trade 3 1 buy 5 100
+> replenished 1 5
+> trade 3 1 buy 5 100
+book
+> empty

@@ -1,0 +1,84 @@
+# Icebergs with self-trade prevention and FOK (D86).
+
+# STP covers the whole iceberg: the cancel reports shown and hidden quantity.
+limit 1 sell 20 100 peak=5 g=1 stp=cn
+> accepted 1
+limit 2 sell 4 100
+> accepted 2
+limit 3 buy 10 100 g=1 stp=co
+> accepted 3
+> stp-cancelled 1 20
+> trade 3 2 buy 4 100
+book
+> bid 100 6 (1)
+
+# Where a same-group order blocks matching (cancel-newest or cancel-both), a FOK order
+# can't count the hidden quantity ahead of it: each replenished slice goes behind the
+# blocker. Here only 7 + 3 trade before matching reaches order 3.
+config 1 1000000
+limit 1 sell 7 100
+> accepted 1
+limit 2 sell 30 100 peak=3
+> accepted 2
+limit 3 sell 5 100 g=1 stp=cn
+> accepted 3
+limit 4 buy 11 100 fok g=1 stp=cn
+> accepted 4
+> cancelled 4 11
+limit 5 buy 10 100 fok g=1 stp=cn
+> accepted 5
+> trade 5 1 buy 7 100
+> trade 5 2 buy 3 100
+> replenished 2 3
+book
+> ask 100 8 (2)
+
+# Cancel-oldest removes the blocker instead, so all 27 left of order 2 count.
+limit 6 buy 28 100 fok g=1 stp=co
+> accepted 6
+> cancelled 6 28
+limit 7 buy 27 100 fok g=1 stp=co
+> accepted 7
+> stp-cancelled 3 5
+> trade 7 2 buy 3 100
+> replenished 2 3
+> trade 7 2 buy 3 100
+> replenished 2 3
+> trade 7 2 buy 3 100
+> replenished 2 3
+> trade 7 2 buy 3 100
+> replenished 2 3
+> trade 7 2 buy 3 100
+> replenished 2 3
+> trade 7 2 buy 3 100
+> replenished 2 3
+> trade 7 2 buy 3 100
+> replenished 2 3
+> trade 7 2 buy 3 100
+> replenished 2 3
+> trade 7 2 buy 3 100
+book
+> empty
+
+# Levels before the blocker's count in full.
+config 1 1000000
+limit 1 sell 20 100 peak=5
+> accepted 1
+limit 2 sell 5 101 g=1 stp=cn
+> accepted 2
+limit 3 sell 10 101
+> accepted 3
+limit 4 buy 21 101 fok g=1 stp=cb
+> accepted 4
+> cancelled 4 21
+limit 5 buy 20 101 fok g=1 stp=cb
+> accepted 5
+> trade 5 1 buy 5 100
+> replenished 1 5
+> trade 5 1 buy 5 100
+> replenished 1 5
+> trade 5 1 buy 5 100
+> replenished 1 5
+> trade 5 1 buy 5 100
+book
+> ask 101 15 (2)

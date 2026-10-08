@@ -13,11 +13,36 @@ use crate::types::{OrderId, Price, Qty, Side};
 #[derive(Clone, Copy, Debug)]
 struct Resting {
     id: OrderId,
+    /// Shown quantity: all of it, unless this is an iceberg.
     qty: Qty,
+    /// An iceberg's slice size (D83). `None` for an ordinary order.
+    peak: Option<Qty>,
+    /// An iceberg's quantity not shown yet; 0 for an ordinary order.
+    hidden: Qty,
     /// Remembered so a modify can't turn a post-only order into a taker (D11).
     post_only: bool,
     /// Remembered so a modify that crosses uses the order's own action (D69).
     stp: Option<Stp>,
+}
+
+impl Resting {
+    /// An order resting `total` open: an iceberg shows up to its peak and hides the rest.
+    fn new(id: OrderId, total: Qty, peak: Option<Qty>, post_only: bool, stp: Option<Stp>) -> Self {
+        let qty = peak.map_or(total, |peak| peak.min(total));
+        Resting {
+            id,
+            qty,
+            peak,
+            hidden: Qty(total.0 - qty.0),
+            post_only,
+            stp,
+        }
+    }
+
+    /// Shown plus hidden: what a cancel removes and a modify sets.
+    fn total(&self) -> Qty {
+        Qty(self.qty.0 + self.hidden.0)
+    }
 }
 
 /// Price -> orders at that price, oldest first.
@@ -74,8 +99,11 @@ impl RefBook {
     }
 
     /// Whether matching would fill all of `qty` at prices crossing `limit` (for FOK).
-    /// Orders of the taker's STP group never fill it (D71): with cancel-oldest they're
-    /// skipped, and with cancel-newest or cancel-both matching stops at the first one.
+    /// Matching reaches an iceberg's hidden quantity too, slice by slice (D86). Orders of
+    /// the taker's STP group never fill it (D71): with cancel-oldest they're skipped, and
+    /// with cancel-newest or cancel-both matching stops at the first one. Every slice
+    /// replenished before that goes behind it, so of the orders ahead of it at its level,
+    /// only the shown quantity counts.
     fn can_fill(&self, side: Side, qty: Qty, limit: Price, stp: Option<Stp>) -> bool {
         let levels = self.levels(side.opposite());
         let crossing: Box<dyn Iterator<Item = (&Price, &VecDeque<Resting>)>> = match side {
@@ -87,15 +115,22 @@ impl RefBook {
             if !side.crosses(limit, price) {
                 break;
             }
+            let (mut shown, mut total) = (0, 0);
             for order in queue {
                 match Stp::conflict(stp, order.stp) {
-                    None => available += order.qty.0,
+                    None => {
+                        shown += order.qty.0;
+                        total += order.total().0;
+                    }
                     Some(StpAction::CancelOldest) => {}
-                    Some(StpAction::CancelNewest | StpAction::CancelBoth) => return false,
+                    Some(StpAction::CancelNewest | StpAction::CancelBoth) => {
+                        return available + shown >= qty.0;
+                    }
                 }
-                if available >= qty.0 {
-                    return true;
-                }
+            }
+            available += total;
+            if available >= qty.0 {
+                return true;
             }
         }
         false
@@ -114,10 +149,7 @@ impl RefBook {
         } = order;
         let check = self.config.check(qty, limit).and_then(|()| {
             check_peak(peak, qty, tif)?;
-            // Icebergs rest from section 2 on.
-            if peak.is_some() {
-                Err(RejectReason::BadPeak)
-            } else if self.last_id.is_some_and(|last| id <= last) {
+            if self.last_id.is_some_and(|last| id <= last) {
                 Err(RejectReason::IdNotIncreasing)
             } else if tif == TimeInForce::PostOnly
                 && limit.is_some_and(|price| self.would_cross(side, price))
@@ -148,7 +180,11 @@ impl RefBook {
         match (limit, tif) {
             (Some(price), TimeInForce::Gtc | TimeInForce::PostOnly) => {
                 let post_only = tif == TimeInForce::PostOnly;
-                self.rest(id, side, price, remaining, post_only, stp)
+                self.rest(
+                    side,
+                    price,
+                    Resting::new(id, remaining, peak, post_only, stp),
+                )
             }
             // Market and IOC orders never rest. (A FOK order that passed `can_fill` filled
             // completely, so it never gets here.)
@@ -156,25 +192,12 @@ impl RefBook {
         }
     }
 
-    fn rest(
-        &mut self,
-        id: OrderId,
-        side: Side,
-        price: Price,
-        qty: Qty,
-        post_only: bool,
-        stp: Option<Stp>,
-    ) {
+    fn rest(&mut self, side: Side, price: Price, order: Resting) {
         self.levels_mut(side)
             .entry(price)
             .or_default()
-            .push_back(Resting {
-                id,
-                qty,
-                post_only,
-                stp,
-            });
-        self.resting.insert(id, (side, price));
+            .push_back(order);
+        self.resting.insert(order.id, (side, price));
     }
 
     /// Match `qty` against the opposite side: best price first, oldest order first
@@ -214,9 +237,10 @@ impl RefBook {
                 if let Some(action) = Stp::conflict(stp, maker.stp) {
                     // Same group: cancel instead of trading. The resting order goes first.
                     if action != StpAction::CancelNewest {
+                        // The whole iceberg goes, hidden quantity too (D86).
                         out.push(Event::SelfTradeCancelled {
                             id: maker.id,
-                            remaining: maker.qty,
+                            remaining: maker.total(),
                         });
                         let id = maker.id;
                         queue.pop_front();
@@ -241,11 +265,24 @@ impl RefBook {
                 });
                 qty.0 -= fill;
                 maker.qty.0 -= fill;
-                if maker.qty.0 == 0 {
-                    let id = maker.id;
-                    queue.pop_front();
-                    self.resting.remove(&id);
+                if maker.qty.0 > 0 {
+                    continue;
                 }
+                let mut maker = queue.pop_front().expect("the maker is at the front");
+                if maker.hidden.0 == 0 {
+                    self.resting.remove(&maker.id);
+                    continue;
+                }
+                // An iceberg shows its next slice at the back of the level (D84), where
+                // this sweep may reach it again (D85).
+                let peak = maker.peak.expect("only an iceberg hides quantity");
+                maker.qty = peak.min(maker.hidden);
+                maker.hidden.0 -= maker.qty.0;
+                out.push(Event::Replenished {
+                    id: maker.id,
+                    qty: maker.qty,
+                });
+                queue.push_back(maker);
             }
             if queue.is_empty() {
                 level.remove();
@@ -278,7 +315,7 @@ impl RefBook {
         match self.unlink(id) {
             Some((_, _, order)) => out.push(Event::Cancelled {
                 id,
-                remaining: order.qty,
+                remaining: order.total(),
             }),
             None => out.push(Event::Rejected {
                 id,
@@ -307,9 +344,13 @@ impl RefBook {
             .find(|o| o.id == id)
             .expect("indexed order is in its level");
 
-        if price == old_price && qty <= order.qty {
+        if price == old_price && qty <= order.total() {
             // Reducing in place: nobody behind this order is worse off, so it keeps its spot.
-            order.qty = qty;
+            // An iceberg loses hidden quantity first, then shown (D88).
+            let cut = order.total().0 - qty.0;
+            let from_hidden = cut.min(order.hidden.0);
+            order.hidden.0 -= from_hidden;
+            order.qty.0 -= cut - from_hidden;
             out.push(Event::Modified { id, qty, price });
             return;
         }
@@ -321,7 +362,8 @@ impl RefBook {
         // The order is off the book now, so it can't meet itself; its own action applies.
         let remaining = self.take(id, side, qty, Some(price), order.stp, out);
         if remaining.0 > 0 {
-            self.rest(id, side, price, remaining, order.post_only, order.stp);
+            let order = Resting::new(id, remaining, order.peak, order.post_only, order.stp);
+            self.rest(side, price, order);
         }
     }
 }
@@ -380,6 +422,12 @@ impl OrderBook for RefBook {
                     if order.qty.0 == 0 {
                         return Err(format!("order {} rests with zero qty", order.id));
                     }
+                    if order
+                        .peak
+                        .map_or(order.hidden.0 > 0, |peak| order.qty > peak)
+                    {
+                        return Err(format!("order {} shows more than its peak", order.id));
+                    }
                     if self.resting.get(&order.id) != Some(&(side, price)) {
                         return Err(format!("order {} missing from the index", order.id));
                     }
@@ -409,6 +457,8 @@ impl OrderBook for RefBook {
                     side,
                     price,
                     qty: o.qty,
+                    peak: o.peak,
+                    hidden: o.hidden,
                     post_only: o.post_only,
                     stp: o.stp,
                 })
@@ -427,7 +477,15 @@ impl OrderBook for RefBook {
         book.last_id = state.last_id;
         // Validated order is priority order, so appending rebuilds each queue as it was.
         for o in &state.orders {
-            book.rest(o.id, o.side, o.price, o.qty, o.post_only, o.stp);
+            let order = Resting {
+                id: o.id,
+                qty: o.qty,
+                peak: o.peak,
+                hidden: o.hidden,
+                post_only: o.post_only,
+                stp: o.stp,
+            };
+            book.rest(o.side, o.price, order);
         }
         Ok(book)
     }
@@ -518,7 +576,8 @@ mod tests {
         let mut book = RefBook::new();
         // Bypass matching to build a book that apply() could never produce.
         for (id, side, price) in [(1, Side::Buy, 101), (2, Side::Sell, 100)] {
-            book.rest(OrderId(id), side, Price(price), Qty(1), false, None);
+            let order = Resting::new(OrderId(id), Qty(1), None, false, None);
+            book.rest(side, Price(price), order);
             book.last_id = Some(OrderId(id));
         }
         assert!(book.check_invariants().unwrap_err().contains("crossed"));
