@@ -33,6 +33,8 @@ const HELP: &str = "\
 commands:
   limit  <id> <buy|sell> <qty> <price> [gtc|ioc|fok|post]   prices are integer ticks
   market <id> <buy|sell> <qty>
+    either may end in g=<group> stp=<cn|co|cb>               self-trade prevention: cancel
+                                                             newest, oldest or both
   modify <id> <qty> <price>                                  qty = new open quantity
   cancel <id>
   book                                                       asks above bids, highest first
@@ -42,8 +44,10 @@ commands:
 const USAGE: &str = "\
 usage:
   lob                                   interactive REPL
-  lob gen <seed> <count> <journal> [max-live]   write generated commands to a journal file
-                                        (max-live: orders the generator keeps alive, default 5000)
+  lob gen <seed> <count> <journal> [max-live] [stp-groups]   write generated commands to a
+                                        journal file (max-live: orders the generator keeps alive,
+                                        default 5000; stp-groups: new orders carry one of this many
+                                        STP groups or none, default 0)
   lob replay <journal> [events-file]    replay a journal, print stats and digest
   lob bench <journal>                   replay through both books, compare speed and digests
   lob gen-queue <orders> <journal>      worst case for cancel: one deep queue, random cancels
@@ -75,8 +79,11 @@ fn main() -> ExitCode {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let result = match args[..] {
         [] => repl().map_err(|e| e.to_string()),
-        ["gen", seed, count, path] => gen(seed, count, path, None),
-        ["gen", seed, count, path, max_live] => gen(seed, count, path, Some(max_live)),
+        ["gen", seed, count, path] => gen(seed, count, path, None, None),
+        ["gen", seed, count, path, max_live] => gen(seed, count, path, Some(max_live), None),
+        ["gen", seed, count, path, max_live, groups] => {
+            gen(seed, count, path, Some(max_live), Some(groups))
+        }
         ["replay", path] => replay_file(path, None),
         ["replay", path, events] => replay_file(path, Some(events)),
         ["bench", path] => bench(path),
@@ -130,15 +137,21 @@ fn write_journal(path: &str, commands: impl IntoIterator<Item = Command>) -> Res
     journal.finish().map(drop).map_err(err)
 }
 
-fn gen(seed: &str, count: &str, path: &str, max_live: Option<&str>) -> Result<(), String> {
+fn gen(
+    seed: &str,
+    count: &str,
+    path: &str,
+    max_live: Option<&str>,
+    groups: Option<&str>,
+) -> Result<(), String> {
     let seed = parse_arg("seed", seed)?;
     let count = parse_arg("count", count)?;
-    let max_live = match max_live {
-        Some(m) => parse_arg("max-live", m)?,
-        None => GenConfig::default().max_live,
-    };
+    let defaults = GenConfig::default();
+    let max_live = max_live.map_or(Ok(defaults.max_live), |m| parse_arg("max-live", m))?;
+    let stp_groups = groups.map_or(Ok(defaults.stp_groups), |g| parse_arg("stp-groups", g))?;
     let config = GenConfig {
         max_live,
+        stp_groups,
         ..GenConfig::with_seed(seed)
     };
     write_journal(path, Generator::new(config).take(count))?;
