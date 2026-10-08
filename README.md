@@ -50,6 +50,9 @@ that part of the tail is the machine (interrupts, preemption), not the code. [Mo
   the books agree on any session, a consumer survives any loss pattern (D49–D52).
 - **Real data:** a NASDAQ ITCH 5.0 day rebuilt with zero errors (D38), and one symbol's flow translated into engine commands so our matching
   is compared with NASDAQ's (D54).
+- **Fuzzing** (cargo-fuzz): every decoder of outside input (journal, feed, ITCH, text) never panics and round-trips what it accepts (D65).
+- **Miri** on the lock-free ring: no undefined behaviour or data races. Weakening any of its six `Acquire`/`Release` operations to `Relaxed`
+  is caught, which no test on x86 hardware can do (D64).
 - **Mutation checks:** every milestone plants bugs on purpose and confirms a test catches each one.
 
 ## Try it
@@ -132,4 +135,4 @@ no self-trade prevention, no risk checks beyond a fat-finger quantity limit, no 
 - [x] **M11** Benchmark report: one script, real ITCH flow through both books, BENCHMARKS.md
 - [x] **M12** Final write-up: DESIGN overview and index, percentile plots, this README
 
-Each milestone's decisions are in [DESIGN.md](DESIGN.md), numbered D1–D63.
+Each milestone's decisions are in [DESIGN.md](DESIGN.md), numbered D1–D66.

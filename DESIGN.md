@@ -37,7 +37,7 @@ so later ones sometimes replace earlier ones, and each replaced entry says what 
 | Fast book | D19–D21, D31, D33, D34 |
 | No allocation on the hot path | D5, D32 |
 | Journal, replay, digest | D15–D17 |
-| Test oracles and generated flow | D10, D13, D18, D22, D49–D52 |
+| Test oracles and generated flow | D10, D13, D18, D22, D49–D52, D64–D66 |
 | Latency and profiling | D23–D29, D48, D55, D60 |
 | Real market data (NASDAQ ITCH 5.0) | D35–D39, D54 |
 | Market data out | D40–D44 |
@@ -69,14 +69,15 @@ What a production exchange has that this engine doesn't, and where each would go
 - **Arbitrary client ids.** Ids must increase per session (D30). A gateway would map client ids to internal increasing ones.
 - **Timestamps on events.** The engine never reads a clock (D4). A gateway would put a time inside each command, and events would carry it.
 - **Entry-time priority for orders displayed late**, which NASDAQ has (M11 results). The engine only sees arrival order.
-- **Per-thread core pinning** (D46; `taskset` pins the process) and a **proof of the ring's memory ordering** (D45: loom, or an ARM machine).
+- **Per-thread core pinning** (D46; `taskset` pins the process), and an exhaustive check of the ring's memory orderings (loom). Miri checks them on sampled interleavings (D64).
 
 ## Future work (D63)
 
 - Top-N or incremental snapshots: full-depth recovery moved 1.14 GB for a 42 MB AAPL feed (M11 results).
 - `perf stat` on the fast book's cancel p99 in the deep200k journal (BENCHMARKS.md).
 - The ITCH runs with a controlled page cache (M7's throughput depends on whether the file is cached).
-- cargo-fuzz targets and Miri over the `unsafe` in the ring. Both need nightly Rust (D49).
+- Longer fuzzing runs on a quiet machine, with seed corpora from the scenario files and the generator (D66).
+- loom for the ring: every interleaving instead of Miri's sampled ones (D64).
 
 ## Decisions
 
@@ -943,6 +944,7 @@ flags: bit 0 side (0 buy / 1 sell; the aggressor's for a trade), bit 1 last mess
   (a dependency). The pipeline runs over either the ring or `sync_channel`, so the choice is measured, not asserted.
 - **Limit of the tests:** x86 is strongly ordered (TSO). Weakening `Acquire`/`Release` to `Relaxed` still passes every test here,
   because the hardware doesn't reorder these stores. Only a model checker (loom) or a weakly ordered CPU (ARM) would catch it.
+  **Update (M12, D64):** Miri catches all six weakenings, so the orderings are now tested, not only argued.
   The orderings are argued in comments, not proven by tests.
 
 ### D46: Three threads: gateway → matching → output
@@ -1064,7 +1066,7 @@ It also made the generator better at *finding* bugs: the priority bug, which sur
 targets hit live orders far more often. The filler left in the longer cases comes from proptest's vector shrinker, which tries removing each element only once.
 Commands that become removable only after other simplifications stay in.
 
-**Not done:** coverage-guided fuzzing (`cargo-fuzz` needs nightly; D49), and a stateful model test of the consumer's buffer with reordering (the link never reorders, D42).
+**Not done then:** coverage-guided fuzzing (`cargo-fuzz` needs nightly; D49; done in M12 as D65), and a stateful model test of the consumer's buffer with reordering (the link never reorders, D42).
 
 ### D53: One report, re-measured in one session (M11)
 - **What:** `scripts/report.sh` re-runs every throughput and latency measurement from M4–M9, plus a new ITCH-driven workload (D54),
@@ -1166,3 +1168,41 @@ Top-N snapshots (M11's 1.14 GB recovery), `perf stat` on deep200k's cancel p99, 
 - **What the plots show that the tables didn't:** past p99.99 the two books meet, and the empty clock window climbs with them
   (0.2–1.3 µs at p99.99, up to 128 µs max). That part of the tail is the machine, not the book; only isolated cores would shrink it.
   The deep queue is the exception: the reference book's cancel scans pull its curve away from the fast book's from about p30 on.
+
+### D64: Miri on the ring (M12)
+- **What:** `cargo +nightly miri test --lib ring` runs the ring's 6 tests under Miri, an interpreter that checks every memory access against Rust's rules:
+  out-of-bounds or uninitialised reads, use after free, and data races (any two accesses to one location with no happens-before between them).
+  It also emulates weak memory: an atomic load can return an older value when the orderings allow it.
+- **Only the ring:** it holds the crate's only `unsafe` (the slot write, the slot read, and `Sync` for the shared ring).
+- **Smaller loops under Miri:** Miri runs about 1000x slower and chooses thread switches itself, so the threaded tests use 20 repetitions and 500 items
+  when `cfg!(miri)` is set (20,000 and 200,000 otherwise). The full suite took over 11 minutes without finishing; the small one takes 5 s.
+- **Mutation-checked:** each of the ring's 6 `Acquire`/`Release` operations weakened to `Relaxed`, one at a time: **6 of 6 caught**.
+  The 4 on `head` and `tail` show up as data races on a slot (the reader has no happens-before with the writer). The 2 on `closed` fail
+  "the last item is never lost", because Miri serves the stale value. On x86 every one of these passes the normal tests (D45).
+- **Limit:** Miri samples interleavings; it doesn't try them all. loom would (Future work).
+
+### D65: cargo-fuzz targets for every decoder of outside input
+- **What:** `fuzz/` (its own crate; nightly only): `journal` (a command payload, and a whole file), `feed` (a message, and a snapshot), `itch`
+  (one message body, and a byte stream through `Reader`), `text` (a command line). None may panic. An accepted command payload, feed message or snapshot
+  must be the canonical encoding of what it decodes to (D50). ITCH isn't byte-canonical, so a decoded message must re-encode to one that decodes the same.
+  Text must print back to a line that parses to the same command.
+- **Why on top of proptest (D49, D50):** proptest generates inputs near valid encodings; libFuzzer learns which inputs reach new branches. They find different bugs.
+- **Two lessons from checking the targets:**
+  - The first `journal` target fuzzed whole files only. Random bytes almost never carry a valid CRC32, so it never reached the payload decoder (coverage stopped at 184),
+    and both planted payload bugs survived. The target now fuzzes the payload decoder directly.
+  - `text` never produced `limit ... fok` in 60 s without help. A dictionary of the format's tokens (`fuzz/text.dict`) fixed that.
+  - Also: the first `itch` crash in seconds was the target's bug, not the library's. `encode` is documented to panic on message types `decode` skips.
+- **Mutation-checked:** 5 planted bugs (an encoder writing FOK as IOC, trailing payload bytes accepted, unknown feed flag bits accepted,
+  an ITCH length check loosened, text printing FOK as `ioc`), each fuzzed 60 s: **5 of 5 caught** after the fixes above.
+
+### D66: 10 minutes per target
+Each target ran 10 minutes on 2026-10-08 (all with the text dictionary, which only helps `text`). **No crash or failed check in any target:**
+
+| Target | Inputs tried | Rate | Coverage (edges) |
+|---|---|---|---|
+| journal | 179M | 298k/s | 320 |
+| feed | 353M | 588k/s | 192 |
+| itch | 9.8M | 16k/s | 333 |
+| text | 144M | 240k/s | 275 |
+
+`itch` is slower because each input also goes through the buffered stream `Reader`. Not on a quiet machine: fuzzing finds bugs, it doesn't measure time, so load only changes how many inputs it tries.
