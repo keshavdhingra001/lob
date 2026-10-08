@@ -1,0 +1,50 @@
+# 2026-10-09T02:24:19+05:30; old = 6cc8ea0 (M13), new = 2b19d7e; lob bench target/latency/gen2m.jrnl, alternated, pinned to cpu 5
+# NOT a quiet machine: another session's 3 'spool' processes used ~3 of 8 cores; only the old/new comparison is meaningful
+### OLD run 1
+2000000 commands, best of 5; 1658 orders resting at the end
+                 apply only               full replay (+ encode + hash)
+reference     149.3 ms  13.40 M/s        269.3 ms   7.43 M/s   digest b3df3bac1e73d7f6
+fast           93.7 ms  21.35 M/s        215.3 ms   9.29 M/s   digest b3df3bac1e73d7f6
+speedup        1.59x                     1.25x
+### NEW run 1
+2000000 commands, best of 5; 1658 orders resting at the end
+                 apply only               full replay (+ encode + hash)
+reference     150.7 ms  13.27 M/s        274.7 ms   7.28 M/s   digest b3df3bac1e73d7f6
+fast           92.4 ms  21.65 M/s        213.6 ms   9.36 M/s   digest b3df3bac1e73d7f6
+speedup        1.63x                     1.29x
+### OLD run 2
+2000000 commands, best of 5; 1658 orders resting at the end
+                 apply only               full replay (+ encode + hash)
+reference     148.1 ms  13.50 M/s        269.8 ms   7.41 M/s   digest b3df3bac1e73d7f6
+fast           93.1 ms  21.47 M/s        213.9 ms   9.35 M/s   digest b3df3bac1e73d7f6
+speedup        1.59x                     1.26x
+### NEW run 2
+2000000 commands, best of 5; 1658 orders resting at the end
+                 apply only               full replay (+ encode + hash)
+reference     153.5 ms  13.03 M/s        273.6 ms   7.31 M/s   digest b3df3bac1e73d7f6
+fast           93.1 ms  21.49 M/s        214.7 ms   9.32 M/s   digest b3df3bac1e73d7f6
+speedup        1.65x                     1.27x
+### OLD run 3
+2000000 commands, best of 5; 1658 orders resting at the end
+                 apply only               full replay (+ encode + hash)
+reference     149.6 ms  13.37 M/s        272.6 ms   7.34 M/s   digest b3df3bac1e73d7f6
+fast           93.1 ms  21.49 M/s        216.8 ms   9.23 M/s   digest b3df3bac1e73d7f6
+speedup        1.61x                     1.26x
+### NEW run 3
+2000000 commands, best of 5; 1658 orders resting at the end
+                 apply only               full replay (+ encode + hash)
+reference     155.6 ms  12.85 M/s        277.3 ms   7.21 M/s   digest b3df3bac1e73d7f6
+fast           93.4 ms  21.40 M/s        212.7 ms   9.40 M/s   digest b3df3bac1e73d7f6
+speedup        1.67x                     1.30x
+### OLD run 4
+2000000 commands, best of 5; 1658 orders resting at the end
+                 apply only               full replay (+ encode + hash)
+reference     150.2 ms  13.31 M/s        275.8 ms   7.25 M/s   digest b3df3bac1e73d7f6
+fast           93.3 ms  21.44 M/s        212.2 ms   9.42 M/s   digest b3df3bac1e73d7f6
+speedup        1.61x                     1.30x
+### NEW run 4
+2000000 commands, best of 5; 1658 orders resting at the end
+                 apply only               full replay (+ encode + hash)
+reference     149.3 ms  13.39 M/s        272.9 ms   7.33 M/s   digest b3df3bac1e73d7f6
+fast           93.1 ms  21.47 M/s        214.3 ms   9.33 M/s   digest b3df3bac1e73d7f6
+speedup        1.60x                     1.27x

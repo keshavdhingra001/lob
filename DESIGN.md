@@ -1378,6 +1378,9 @@ Each target ran 10 minutes on 2026-10-08 (all with the text dictionary, which on
 - **Snapshot pause** (gen2m, a snapshot every 200k commands, a book of about 1,600 resting orders, a 48 KB file): mean 2.1–6.1 ms, max 2.7–19 ms per
   snapshot. That's mostly the two fsyncs (file and directory) plus the rename, not encoding the book. At this book size, D77's
   write-on-the-matching-thread is fine, and a background writer would remove fsync time, not encoding time.
+- **`replay` rebuilt on `Recorder`** (the resumable part, D75) costs nothing measurable ([raw output](bench/results/2026-10-09-m14-replay-ab/)):
+  `lob bench` full replay on gen2m, M13 and M14 binaries alternated 4 times on one pinned core (another session was using 3 cores):
+  fast book 9.23–9.42 M/s before, 9.32–9.40 after; reference book 7.25–7.43 before, 7.21–7.33 after.
 - **Recovery** of the 2M-command journal (50 MB): 18 ms from the last snapshot (nothing after it to replay) against 246–249 ms replaying from zero
   (about 8M commands/s). The snapshot's value grows with the journal: replay cost is linear in history, the snapshot's is linear in the live book.
 
