@@ -16,7 +16,7 @@
 //! passive orders of 20 lots or more are icebergs showing a fifth (D89). The defaults have
 //! neither, and draw exactly the numbers they always did, so the golden digest is unchanged.
 
-use std::num::NonZeroU16;
+use std::num::{NonZeroU16, NonZeroU64};
 
 use crate::command::{Command, Stp, StpAction, TimeInForce};
 use crate::rng::Rng;
@@ -150,7 +150,7 @@ impl Generator {
         price: i64,
         qty: u64,
         tif: TimeInForce,
-        peak: Option<Qty>,
+        peak: Option<NonZeroU64>,
     ) -> Command {
         let id = self.fresh_id();
         if matches!(tif, TimeInForce::Gtc | TimeInForce::PostOnly) {
@@ -183,7 +183,7 @@ impl Generator {
         };
         // `&&` keeps the default flow's draws as they were.
         let iceberg = self.iceberg_pct > 0 && qty >= 20 && self.rng.chance(self.iceberg_pct);
-        let peak = iceberg.then_some(Qty(qty / 5));
+        let peak = NonZeroU64::new(qty / 5).filter(|_| iceberg);
         self.order(side, price, qty, tif, peak)
     }
 

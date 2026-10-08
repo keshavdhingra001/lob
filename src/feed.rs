@@ -9,6 +9,7 @@
 //! ```
 
 use std::collections::{BTreeMap, HashMap};
+use std::num::NonZeroU64;
 
 use crate::book::Level;
 use crate::command::{Command, Event};
@@ -195,7 +196,7 @@ impl Publisher {
                     side: order.side,
                     price: order.limit,
                     open: order.qty.0,
-                    peak: order.peak.map(|p| p.0),
+                    peak: order.peak.map(NonZeroU64::get),
                 })?;
             }
             Event::Rejected { .. } => {}

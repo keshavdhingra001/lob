@@ -2,9 +2,7 @@
 # the next one shows at the back of its level, and matching may reach it again.
 # `book` prints shown quantity only, as market data does.
 
-# Entry: 0 < peak < qty, on an order that can rest (GTC or post-only).
-limit 1 sell 10 100 peak=0
-> rejected 1 bad-peak
+# Entry: peak < qty, on an order that can rest (GTC or post-only). (peak=0 doesn't parse.)
 limit 1 sell 10 100 peak=10
 > rejected 1 bad-peak
 limit 1 sell 10 100 ioc peak=5

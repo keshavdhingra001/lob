@@ -16,6 +16,7 @@
 //! the shown parts while cancels report the totals.
 
 use std::collections::HashMap;
+use std::num::NonZeroU64;
 
 use crate::book::OrderBook;
 use crate::command::{Command, Event, Stp, StpAction, TimeInForce};
@@ -160,7 +161,7 @@ impl Ledger {
                 let live = Live {
                     open: order.qty.0,
                     shown: 0,
-                    peak: order.peak.map(|p| p.0),
+                    peak: order.peak.map(NonZeroU64::get),
                     price: order.limit,
                 };
                 if self.live.insert(id, live).is_some() {

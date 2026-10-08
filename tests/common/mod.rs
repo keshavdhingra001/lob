@@ -1,6 +1,8 @@
 //! Shared by the integration tests.
 #![allow(dead_code)]
 
+use std::num::NonZeroU64;
+
 use lob::command::TimeInForce;
 use lob::gen::random_stp;
 use lob::rng::Rng;
@@ -54,7 +56,9 @@ pub fn random_command(
                 qty,
                 price,
                 tif,
-                peak: (icebergs && rng.chance(33)).then(|| Qty(rng.below(14))),
+                peak: (icebergs && rng.chance(33))
+                    .then(|| NonZeroU64::new(rng.below(14)))
+                    .flatten(),
                 stp: random_stp(rng, groups),
             }
         }

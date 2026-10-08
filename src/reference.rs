@@ -166,6 +166,7 @@ impl RefBook {
         self.last_id = Some(id);
         out.push(Event::Accepted { id });
 
+        let peak = peak.map(|p| Qty(p.get()));
         if tif == TimeInForce::Fok {
             let limit = limit.expect("only limit orders carry a time in force");
             if !self.can_fill(side, qty, limit, stp) {

@@ -14,7 +14,7 @@
 //! ```
 
 use std::fmt;
-use std::num::NonZeroU16;
+use std::num::{NonZeroU16, NonZeroU64};
 use std::str::FromStr;
 
 use crate::error::ParseError;
@@ -30,8 +30,9 @@ pub enum Command {
         price: Price,
         tif: TimeInForce,
         /// An iceberg (D83): only `peak` of the resting quantity shows at a time. The book
-        /// checks `0 < peak < qty` and a resting time in force.
-        peak: Option<Qty>,
+        /// checks `peak < qty` and a resting time in force. Like an STP group, a peak of 0
+        /// doesn't exist, so "no peak" costs no space (D87).
+        peak: Option<NonZeroU64>,
         stp: Option<Stp>,
     },
     /// Match against the opposite side at any price. Never rests.
@@ -145,7 +146,7 @@ pub struct NewOrder {
     pub qty: Qty,
     pub limit: Option<Price>,
     pub tif: TimeInForce,
-    pub peak: Option<Qty>,
+    pub peak: Option<NonZeroU64>,
     pub stp: Option<Stp>,
 }
 
@@ -280,7 +281,7 @@ impl FromStr for StpAction {
 /// this order: `peak=<n>` (D83), then `g=<group> stp=<action>` together (D73), so each
 /// command has exactly one spelling.
 /// A new order's positional arguments, its peak and its STP pair.
-type Split<'a> = (&'a [&'a str], Option<Qty>, Option<Stp>);
+type Split<'a> = (&'a [&'a str], Option<NonZeroU64>, Option<Stp>);
 
 fn split_named<'a>(args: &'a [&'a str]) -> Result<Split<'a>, ParseError> {
     let at = args
@@ -290,8 +291,9 @@ fn split_named<'a>(args: &'a [&'a str]) -> Result<Split<'a>, ParseError> {
     let (positional, mut named) = args.split_at(at);
     let mut peak = None;
     if let Some(value) = named.first().and_then(|a| a.strip_prefix("peak=")) {
-        // A zero or oversized peak parses: whether it's valid depends on the order (D83).
-        peak = Some(Qty(parse_num("peak", value)?));
+        // 0 doesn't parse (no peak is spelled by leaving it out). An oversized peak does:
+        // whether it's valid depends on the order (D83).
+        peak = Some(parse_num("peak", value)?);
         named = &named[1..];
     }
     Ok((positional, peak, parse_stp(named)?))
@@ -541,7 +543,7 @@ mod tests {
             "market 6 sell 2 g=1 stp=cb",
             "limit 7 buy 100 50 peak=10",
             "limit 8 sell 100 50 post peak=1 g=2 stp=co",
-            "limit 9 sell 1 50 ioc peak=0",
+            "limit 9 sell 1 50 ioc peak=1",
         ] {
             let cmd = parse(line).unwrap();
             assert_eq!(cmd.to_string(), line);
@@ -626,13 +628,24 @@ mod tests {
             Ok(other) => panic!("{other:?}"),
             Err(e) => Err(e),
         };
-        assert_eq!(named("limit 1 buy 9 100 peak=3"), Ok((Some(Qty(3)), None)));
+        let three = NonZeroU64::new(3);
+        assert_eq!(named("limit 1 buy 9 100 peak=3"), Ok((three, None)));
         assert_eq!(
             named("limit 1 buy 9 100 post peak=3 g=4 stp=cn"),
-            Ok((Some(Qty(3)), Some(4)))
+            Ok((three, Some(4)))
         );
-        // The book decides whether a peak is valid for the order (D83), so 0 parses.
-        assert_eq!(named("limit 1 buy 9 100 peak=0"), Ok((Some(Qty(0)), None)));
+        // The book decides whether a peak is valid for the order (D83), but 0 never is.
+        assert_eq!(
+            named("limit 1 buy 9 100 peak=9"),
+            Ok((NonZeroU64::new(9), None))
+        );
+        assert_eq!(
+            named("limit 1 buy 9 100 peak=0"),
+            Err(ParseError::BadNumber {
+                field: "peak",
+                value: "0".into(),
+            })
+        );
         assert_eq!(
             named("limit 1 buy 9 100 g=4 stp=cn peak=3"),
             Err(ParseError::BadStp("g=4 stp=cn peak=3".into()))

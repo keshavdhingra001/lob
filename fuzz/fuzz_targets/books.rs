@@ -5,7 +5,7 @@
 //! share levels and replenish icebergs all the time.
 #![no_main]
 
-use std::num::NonZeroU16;
+use std::num::{NonZeroU16, NonZeroU64};
 
 use libfuzzer_sys::fuzz_target;
 use lob::ledger::Ledger;
@@ -54,8 +54,8 @@ fn command([a, q, p, x]: [u8; 4], next: &mut u64) -> Command {
             OrderId(*next - 1)
         }
     };
-    // Extras: a peak in the low nibble (0..14, or none), an STP group and action above it.
-    let peak = (x & 15 >= 2).then(|| Qty(u64::from(x & 15) - 2));
+    // Extras: a peak in the low nibble (1..14, or none), an STP group and action above it.
+    let peak = NonZeroU64::new(u64::from(x & 15)).filter(|p| p.get() < 14);
     let actions = [
         StpAction::CancelNewest,
         StpAction::CancelOldest,

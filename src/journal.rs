@@ -22,6 +22,7 @@
 //! reads unchanged.
 
 use std::io::{self, Write};
+use std::num::NonZeroU64;
 
 use thiserror::Error;
 
@@ -187,7 +188,7 @@ pub fn encode_command(cmd: &Command, buf: &mut [u8; MAX_PAYLOAD]) -> usize {
             w.u64(price.0 as u64);
             w.u8(tif_byte(tif));
             if let Some(peak) = peak {
-                w.u64(peak.0);
+                w.u64(peak.get());
                 if stp.is_none() {
                     // Tag 7 is fixed width: group 0, action 0 (D89).
                     w.u16(0);
@@ -227,7 +228,12 @@ pub fn decode_command(payload: &[u8]) -> Result<Command, &'static str> {
             qty: Qty(r.u64()?),
             price: Price(r.u64()? as i64),
             tif: byte_tif(r.u8()?)?,
-            peak: if tag == 7 { Some(Qty(r.u64()?)) } else { None },
+            peak: if tag == 7 {
+                // Peak 0 would be a second spelling of "no peak" (tag 1 or 5).
+                Some(NonZeroU64::new(r.u64()?).ok_or("peak 0")?)
+            } else {
+                None
+            },
             stp: match tag {
                 5 => Some(r.stp()?),
                 7 => r.optional_stp()?,
@@ -646,6 +652,8 @@ mod tests {
         // An iceberg without a group spells it as group 0, action 0, and nothing else.
         let mut iceberg = [0u8; 38];
         iceberg[0] = 7;
+        assert_eq!(invalid(&iceberg), "peak 0");
+        iceberg[27] = 1;
         assert!(read_journal(&raw_record(&iceberg)).is_ok());
         iceberg[37] = 1;
         assert_eq!(invalid(&iceberg), "stp action without a group");

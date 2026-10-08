@@ -102,7 +102,7 @@ fn session(ops: &[Op]) -> Vec<Command> {
                 qty: Qty(qty),
                 price: Price(price),
                 tif,
-                peak: peak.map(Qty),
+                peak: peak.and_then(std::num::NonZeroU64::new),
                 stp,
             },
             Op::Market(id, side, qty, stp) => Command::Market {

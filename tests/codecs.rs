@@ -39,7 +39,8 @@ fn command() -> impl Strategy<Value = Command> {
         Just(TimeInForce::PostOnly),
     ];
     let (id, qty, price) = (any::<u64>(), any::<u64>(), any::<i64>());
-    let peak = proptest::option::of(any::<u64>().prop_map(Qty));
+    let peak =
+        proptest::option::of((1..=u64::MAX).prop_map(|p| std::num::NonZeroU64::new(p).unwrap()));
     prop_oneof![
         (id, side(), qty, price, tif, peak, stp()).prop_map(
             |(id, side, qty, price, tif, peak, stp)| {
@@ -286,7 +287,7 @@ fn book_snapshot_bytes() -> impl Strategy<Value = Vec<u8>> {
             qty: Qty(qty.0 % 20),
             price: Price(price.0.rem_euclid(30)),
             tif,
-            peak: peak.map(|p| Qty(p.0 % 20)),
+            peak: peak.and_then(|p| std::num::NonZeroU64::new(p.get() % 20)),
             stp,
         },
         Command::Market { id, side, qty, stp } => Command::Market {
