@@ -5,8 +5,11 @@
 use lob::consumer::{Action, Consumer};
 use lob::feed::Publisher;
 use lob::ledger::Ledger;
+use std::num::NonZeroU16;
+
 use lob::{
-    BookConfig, Command, FastBook, OrderBook, OrderId, Price, Qty, RefBook, Side, TimeInForce,
+    BookConfig, Command, FastBook, OrderBook, OrderId, Price, Qty, RefBook, Side, Stp, StpAction,
+    TimeInForce,
 };
 use proptest::prelude::*;
 
@@ -25,8 +28,8 @@ enum NewId {
 
 #[derive(Clone, Copy, Debug)]
 enum Op {
-    Limit(NewId, Side, u64, i64, TimeInForce),
-    Market(NewId, Side, u64),
+    Limit(NewId, Side, u64, i64, TimeInForce, Option<Stp>),
+    Market(NewId, Side, u64, Option<Stp>),
     /// Targets are the k-th most recent id (0: the latest), so some are finished or were
     /// never accepted. Relative targets keep their meaning when shrinking removes an
     /// earlier operation, which absolute ids wouldn't.
@@ -49,10 +52,23 @@ fn op() -> impl Strategy<Value = Op> {
     let qty = prop_oneof![12 => 1..14u64, 1 => Just(0u64)];
     let price = 95..106i64;
     let target = 0..8u64;
+    // No group first (it shrinks there), else one of two groups (D67).
+    let action = prop_oneof![
+        Just(StpAction::CancelNewest),
+        Just(StpAction::CancelOldest),
+        Just(StpAction::CancelBoth),
+    ];
+    let stp = prop_oneof![
+        2 => Just(None),
+        1 => (1..=2u16, action).prop_map(|(g, action)| Some(Stp {
+            group: NonZeroU16::new(g).unwrap(),
+            action,
+        })),
+    ];
     prop_oneof![
-        5 => (new_id.clone(), side.clone(), qty.clone(), price.clone(), tif)
-            .prop_map(|(i, s, q, p, t)| Op::Limit(i, s, q, p, t)),
-        1 => (new_id, side, qty.clone()).prop_map(|(i, s, q)| Op::Market(i, s, q)),
+        5 => (new_id.clone(), side.clone(), qty.clone(), price.clone(), tif, stp.clone())
+            .prop_map(|(i, s, q, p, t, g)| Op::Limit(i, s, q, p, t, g)),
+        1 => (new_id, side, qty.clone(), stp).prop_map(|(i, s, q, g)| Op::Market(i, s, q, g)),
         2 => (target.clone(), qty, price).prop_map(|(t, q, p)| Op::Modify(t, q, p)),
         2 => target.prop_map(Op::Cancel),
     ]
@@ -78,19 +94,19 @@ fn session(ops: &[Op]) -> Vec<Command> {
     let mut commands = Vec::with_capacity(ops.len());
     for &op in ops {
         commands.push(match op {
-            Op::Limit(id, side, qty, price, tif) => Command::Limit {
+            Op::Limit(id, side, qty, price, tif, stp) => Command::Limit {
                 id: new_id(id, &mut next),
                 side,
                 qty: Qty(qty),
                 price: Price(price),
                 tif,
-                stp: None,
+                stp,
             },
-            Op::Market(id, side, qty) => Command::Market {
+            Op::Market(id, side, qty, stp) => Command::Market {
                 id: new_id(id, &mut next),
                 side,
                 qty: Qty(qty),
-                stp: None,
+                stp,
             },
             Op::Modify(t, qty, price) => Command::Modify {
                 id: recent(t, next),

@@ -10,8 +10,14 @@
 //! The generator can't see the book, so some cancels and modifies target orders that
 //! already filled, and those come back `rejected unknown-order`, as late cancels do on
 //! real venues.
+//!
+//! With `stp_groups` set, new orders also carry STP groups (D67), drawn from a few so
+//! that self-trades are constantly attempted. The default has none, and draws exactly
+//! the numbers it always did, so the golden digest is unchanged.
 
-use crate::command::{Command, TimeInForce};
+use std::num::NonZeroU16;
+
+use crate::command::{Command, Stp, StpAction, TimeInForce};
 use crate::rng::Rng;
 use crate::types::{OrderId, Price, Qty, Side};
 
@@ -22,6 +28,8 @@ pub struct GenConfig {
     pub start_mid: i64,
     /// Orders the generator tracks for cancels and modifies. Bounds its memory too.
     pub max_live: usize,
+    /// New orders get a group in `1..=stp_groups`, or none, with equal odds. 0: never.
+    pub stp_groups: u16,
 }
 
 impl Default for GenConfig {
@@ -30,6 +38,7 @@ impl Default for GenConfig {
             seed: 1,
             start_mid: 10_000,
             max_live: 5_000,
+            stp_groups: 0,
         }
     }
 }
@@ -48,6 +57,7 @@ pub struct Generator {
     mid: i64,
     next_id: u64,
     max_live: usize,
+    stp_groups: u16,
     live: Vec<Live>,
 }
 
@@ -73,6 +83,7 @@ impl Generator {
             mid: config.start_mid,
             next_id: 1,
             max_live: config.max_live,
+            stp_groups: config.stp_groups,
             live: Vec::new(),
         }
     }
@@ -88,6 +99,20 @@ impl Generator {
         } else {
             Side::Sell
         }
+    }
+
+    fn stp(&mut self) -> Option<Stp> {
+        if self.stp_groups == 0 {
+            return None;
+        }
+        let group = NonZeroU16::new(self.rng.below(self.stp_groups as u64 + 1) as u16)?;
+        const ACTIONS: [StpAction; 3] = [
+            StpAction::CancelNewest,
+            StpAction::CancelOldest,
+            StpAction::CancelBoth,
+        ];
+        let action = ACTIONS[self.rng.below(3) as usize];
+        Some(Stp { group, action })
     }
 
     /// Mostly small round lots, occasionally a large one.
@@ -135,7 +160,7 @@ impl Generator {
             qty: Qty(qty),
             price: Price(price),
             tif,
-            stp: None,
+            stp: self.stp(),
         }
     }
 
@@ -212,7 +237,7 @@ impl Iterator for Generator {
                 id,
                 side,
                 qty: Qty(qty),
-                stp: None,
+                stp: self.stp(),
             }
         } else {
             self.passive()

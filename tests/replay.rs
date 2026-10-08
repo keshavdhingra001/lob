@@ -1,10 +1,10 @@
 //! Deterministic replay end to end: generator -> journal -> replay -> digest.
 
-use lob::gen::Generator;
+use lob::gen::{GenConfig, Generator};
 use lob::journal::{read_journal, JournalWriter};
 use lob::ledger::Ledger;
 use lob::replay::replay;
-use lob::{Command, OrderBook, RefBook};
+use lob::{Command, Event, OrderBook, RefBook, StpAction};
 
 fn generate(seed: u64, n: usize) -> Vec<Command> {
     Generator::seeded(seed).take(n).collect()
@@ -85,4 +85,44 @@ fn golden_digest() {
         (20_000, 28_834, 8_316, 5_519)
     );
     assert_eq!(stats.digest, 0xf0cd_0c4b_e21b_0c27);
+}
+
+/// The grouped flow (D67) really attempts self-trades, and every action shows up as the
+/// cancels D68 allows it, while the ledger checks each one and quantity is conserved.
+#[test]
+fn grouped_flow_exercises_every_stp_action() {
+    let config = GenConfig {
+        stp_groups: 3,
+        ..GenConfig::with_seed(4)
+    };
+    let mut book = RefBook::new();
+    let mut ledger = Ledger::new();
+    let mut events = Vec::new();
+    // [cn, co, cb] x [resting order cancelled, incoming order cancelled].
+    let mut seen = [[0; 2]; 3];
+    for (n, cmd) in Generator::new(config).take(30_000).enumerate() {
+        events.clear();
+        book.apply(&cmd, &mut events);
+        let fail = |e: String| panic!("command #{n} `{cmd}`: {e}");
+        book.check_invariants().unwrap_or_else(fail);
+        ledger.observe(&cmd, &events, &book).unwrap_or_else(fail);
+        let Some(stp) = cmd.new_order().and_then(|o| o.stp) else {
+            continue;
+        };
+        for e in &events {
+            if let Event::SelfTradeCancelled { id, .. } = *e {
+                let action = match stp.action {
+                    StpAction::CancelNewest => 0,
+                    StpAction::CancelOldest => 1,
+                    StpAction::CancelBoth => 2,
+                };
+                seen[action][usize::from(id == cmd.id())] += 1;
+            }
+        }
+    }
+    let [cn, co, cb] = seen;
+    assert!(
+        cn[1] > 100 && co[0] > 100 && cb[0] > 100 && cb[1] > 100,
+        "{seen:?}"
+    );
 }

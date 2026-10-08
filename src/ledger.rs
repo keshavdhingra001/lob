@@ -4,17 +4,23 @@
 //! its own count of every live order's open quantity, and after each command checks
 //! that count against the book's public depth. If a book loses, invents or double-fills
 //! a single unit, the totals stop matching.
+//!
+//! It also checks self-trade prevention from the outside (D70): no trade between two
+//! orders of one group, STP cancels only between orders of one group and only as the
+//! taker's action allows, and nothing after the taker's own STP cancel.
 
 use std::collections::HashMap;
 
 use crate::book::OrderBook;
-use crate::command::{Command, Event, TimeInForce};
+use crate::command::{Command, Event, Stp, StpAction, TimeInForce};
 use crate::types::{OrderId, Price, Qty, Side};
 
 #[derive(Default)]
 pub struct Ledger {
     /// Open (unfilled, uncancelled) quantity of every live order.
     open: HashMap<OrderId, u64>,
+    /// The STP group and action of every live order that has one.
+    stp: HashMap<OrderId, Stp>,
 }
 
 impl Ledger {
@@ -37,10 +43,18 @@ impl Ledger {
             Command::Modify { price, .. } => (Some(price), None),
             Command::Cancel { .. } => (None, None),
         };
+        let taker_stopped = events
+            .iter()
+            .position(|e| matches!(*e, Event::SelfTradeCancelled { id, .. } if id == cmd.id()));
+        if taker_stopped.is_some_and(|i| i + 1 != events.len()) {
+            return Err(ctx("events after the taker's STP cancel".into()));
+        }
         for event in events {
             self.apply_event(cmd, event, limit, side).map_err(ctx)?;
         }
         self.open.retain(|_, qty| *qty > 0);
+        let open = &self.open;
+        self.stp.retain(|id, _| open.contains_key(id));
 
         // Market, IOC and FOK orders must be done by the end of their own command. (Only
         // if accepted: a rejected id that isn't increasing may belong to an older order that rests.)
@@ -96,6 +110,9 @@ impl Ledger {
                 if self.open.insert(id, qty.0).is_some() {
                     return Err(format!("order {id} accepted while already open"));
                 }
+                if let Some(stp) = cmd.new_order().and_then(|o| o.stp) {
+                    self.stp.insert(id, stp);
+                }
             }
             Event::Rejected { id, .. } => {
                 if id != cmd.id() {
@@ -125,6 +142,11 @@ impl Ledger {
                 if limit.is_some_and(|limit| !taker_side.crosses(limit, price)) {
                     return Err(format!("trade through the taker's limit: {event}"));
                 }
+                if Stp::conflict(self.stp.get(&taker).copied(), self.stp.get(&maker).copied())
+                    .is_some()
+                {
+                    return Err(format!("self-trade: {event}"));
+                }
                 for id in [taker, maker] {
                     let open = self
                         .open
@@ -135,14 +157,34 @@ impl Ledger {
                         .ok_or_else(|| format!("{event}: order {id} only had {open} open"))?;
                 }
             }
-            Event::Cancelled { id, remaining } | Event::SelfTradeCancelled { id, remaining } => {
-                let open = self.open.remove(&id).unwrap_or(0);
-                if open != remaining.0 || open == 0 {
-                    return Err(format!(
-                        "cancelled {id} with {remaining} but the ledger had {open} open"
-                    ));
+            Event::SelfTradeCancelled { id, remaining } => {
+                // The taker's action decides who may be cancelled (D68, D69).
+                let taker = cmd.id();
+                let action =
+                    Stp::conflict(self.stp.get(&taker).copied(), self.stp.get(&id).copied())
+                        .ok_or_else(|| format!("{event}: not in the taker's STP group"))?;
+                let allowed = if id == taker {
+                    action != StpAction::CancelOldest
+                } else {
+                    action != StpAction::CancelNewest
+                };
+                if !allowed {
+                    return Err(format!("{event}: the taker's action is {action}"));
                 }
+                self.close(id, remaining)?;
             }
+            Event::Cancelled { id, remaining } => self.close(id, remaining)?,
+        }
+        Ok(())
+    }
+
+    /// An order is done with `remaining` unfilled, which must be all it had open.
+    fn close(&mut self, id: OrderId, remaining: Qty) -> Result<(), String> {
+        let open = self.open.remove(&id).unwrap_or(0);
+        if open != remaining.0 || open == 0 {
+            return Err(format!(
+                "cancelled {id} with {remaining} but the ledger had {open} open"
+            ));
         }
         Ok(())
     }
@@ -220,5 +262,68 @@ mod tests {
             })
             .collect();
         assert!(ledger.observe(&cmd, &forged, &book).is_err());
+    }
+
+    /// Run `setup`, then check `forge(events of last)` against the ledger.
+    fn forged(setup: &[&str], last: &str, forge: impl Fn(&mut Vec<Event>)) -> Result<(), String> {
+        let mut book = RefBook::new();
+        let mut ledger = Ledger::new();
+        let mut events = Vec::new();
+        for line in setup {
+            let cmd: Command = line.parse().unwrap();
+            events.clear();
+            book.apply(&cmd, &mut events);
+            ledger.observe(&cmd, &events, &book).unwrap();
+        }
+        let cmd: Command = last.parse().unwrap();
+        events.clear();
+        book.apply(&cmd, &mut events);
+        forge(&mut events);
+        ledger.observe(&cmd, &events, &book)
+    }
+
+    #[test]
+    fn catches_self_trade_prevention_errors() {
+        let setup = ["limit 1 sell 5 100 g=1 stp=cn", "limit 2 sell 5 100"];
+        let stp = |id, qty| Event::SelfTradeCancelled {
+            id: OrderId(id),
+            remaining: Qty(qty),
+        };
+        let trade = |maker| Event::Trade {
+            taker: OrderId(3),
+            maker: OrderId(maker),
+            taker_side: Side::Buy,
+            qty: Qty(5),
+            price: Price(100),
+        };
+        // The honest events pass.
+        forged(&setup, "limit 3 buy 10 100 g=1 stp=co", |_| {}).unwrap();
+        // A self-trade printed instead of the cancel.
+        let err = forged(&setup, "limit 3 buy 10 100 g=1 stp=co", |e| e[1] = trade(1));
+        assert!(err.unwrap_err().contains("self-trade"));
+        // Cancel-newest must not cancel the resting order...
+        let err = forged(&setup, "limit 3 buy 10 100 g=1 stp=cn", |e| {
+            *e = vec![e[0], stp(1, 5)]
+        });
+        assert!(err.unwrap_err().contains("action is cn"));
+        // ...and cancel-oldest must not cancel the taker.
+        let err = forged(&setup, "limit 3 buy 10 100 g=1 stp=co", |e| {
+            *e = vec![e[0], stp(3, 10)]
+        });
+        assert!(err.unwrap_err().contains("action is co"));
+        // No STP cancel across groups, or for an ungrouped order.
+        let err = forged(&setup, "limit 3 buy 10 100 g=2 stp=co", |e| {
+            *e = vec![e[0], stp(1, 5), trade(2)]
+        });
+        assert!(err.unwrap_err().contains("not in the taker's STP group"));
+        let err = forged(&setup, "limit 3 buy 10 100", |e| {
+            *e = vec![e[0], stp(3, 10)]
+        });
+        assert!(err.unwrap_err().contains("not in the taker's STP group"));
+        // Nothing may follow the taker's own STP cancel.
+        let err = forged(&setup, "limit 3 buy 10 100 g=1 stp=cn", |e| {
+            e.push(trade(2))
+        });
+        assert!(err.unwrap_err().contains("after the taker's STP cancel"));
     }
 }

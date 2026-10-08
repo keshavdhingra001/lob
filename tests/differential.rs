@@ -8,7 +8,7 @@
 mod common;
 
 use common::random_command;
-use lob::gen::Generator;
+use lob::gen::{GenConfig, Generator};
 use lob::ledger::Ledger;
 use lob::rng::Rng;
 use lob::{BookConfig, Command, FastBook, OrderBook, Price, RefBook, Side};
@@ -70,19 +70,19 @@ fn compare(
     }
 }
 
-fn edge_cases(seed: u64, n: usize, tick: i64) -> impl Iterator<Item = Command> {
+fn edge_cases(seed: u64, n: usize, tick: i64, groups: u16) -> impl Iterator<Item = Command> {
     let mut rng = Rng::new(seed);
     let mut next_id = 1;
-    (0..n).map(move |_| random_command(&mut rng, &mut next_id, tick))
+    (0..n).map(move |_| random_command(&mut rng, &mut next_id, tick, groups))
 }
 
 /// Edge-case flow with prices spread over the fast book's ladder window (D33): mostly near
 /// the first price, but also straddling both window edges and far outside it (the overflow
 /// tree). Matching then runs across the window/overflow boundary in both directions.
-fn wide(seed: u64, n: usize, tick: i64) -> impl Iterator<Item = Command> {
+fn wide(seed: u64, n: usize, tick: i64, groups: u16) -> impl Iterator<Item = Command> {
     let half = (lob::ladder::WINDOW / 2) as i64 * tick;
     let mut rng = Rng::new(seed ^ 0x5a5a_5a5a);
-    edge_cases(seed, n, tick).map(move |cmd| {
+    edge_cases(seed, n, tick, groups).map(move |cmd| {
         let shift = match rng.below(10) {
             0 => half,
             1 => -half,
@@ -142,7 +142,7 @@ fn edge_case_flow_matches_reference() {
         compare(
             &format!("edge seed {seed}"),
             edge_config(1),
-            edge_cases(seed, 10_000, 1),
+            edge_cases(seed, 10_000, 1, 0),
             1,
         );
     }
@@ -150,7 +150,7 @@ fn edge_case_flow_matches_reference() {
         compare(
             &format!("edge tick-5 seed {seed}"),
             edge_config(5),
-            edge_cases(seed, 10_000, 5),
+            edge_cases(seed, 10_000, 5, 0),
             1,
         );
     }
@@ -163,7 +163,7 @@ fn wide_price_flow_matches_reference() {
             compare(
                 &format!("wide tick-{tick} seed {seed}"),
                 edge_config(tick),
-                wide(seed, 10_000, tick),
+                wide(seed, 10_000, tick, 0),
                 1,
             );
         }
@@ -176,12 +176,50 @@ fn wide_price_flow_uses_the_overflow() {
     let mut book = FastBook::with_config(edge_config(1));
     let mut events = Vec::new();
     let mut most = 0;
-    for cmd in wide(0, 10_000, 1) {
+    for cmd in wide(0, 10_000, 1, 0) {
         events.clear();
         book.apply(&cmd, &mut events);
         most = most.max(book.overflow_levels());
     }
     assert!(most >= 4, "at most {most} overflow levels");
+}
+
+/// Generated flow where new orders carry one of 3 STP groups (or none).
+fn grouped(seed: u64) -> Generator {
+    Generator::new(GenConfig {
+        stp_groups: 3,
+        ..GenConfig::with_seed(seed)
+    })
+}
+
+/// Self-trade prevention (D70, D71) on every flow, with few groups so that self-trades are
+/// attempted all the time.
+#[test]
+fn stp_flow_matches_reference() {
+    for seed in 1..=3 {
+        compare(
+            &format!("grouped seed {seed}"),
+            BookConfig::default(),
+            grouped(seed).take(40_000),
+            10,
+        );
+    }
+    for seed in 0..20 {
+        compare(
+            &format!("grouped edge seed {seed}"),
+            edge_config(1),
+            edge_cases(seed, 10_000, 1, 2),
+            1,
+        );
+    }
+    for seed in 0..5 {
+        compare(
+            &format!("grouped wide seed {seed}"),
+            edge_config(1),
+            wide(seed, 10_000, 1, 2),
+            1,
+        );
+    }
 }
 
 #[test]
@@ -209,13 +247,25 @@ fn long_differential_run() {
         compare(
             &format!("edge seed {seed}"),
             edge_config(1),
-            edge_cases(seed, 500_000, 1),
+            edge_cases(seed, 500_000, 1, 0),
             1_000,
         );
         compare(
             &format!("wide seed {seed}"),
             edge_config(1),
-            wide(seed, 500_000, 1),
+            wide(seed, 500_000, 1, 0),
+            1_000,
+        );
+        compare(
+            &format!("grouped edge seed {seed}"),
+            edge_config(1),
+            edge_cases(seed, 500_000, 1, 2),
+            1_000,
+        );
+        compare(
+            &format!("grouped seed {seed}"),
+            BookConfig::default(),
+            grouped(seed).take(1_000_000),
             1_000,
         );
     }
