@@ -10,7 +10,7 @@
 //! header:  "LOBS" | version u32
 //!          tick_size i64 | max_qty u64 | has_last_id u8 | last_id u64
 //!          commands u64 | events u64 | trades u64 | rejects u64 | digest u64
-//!          journal_offset u64 | orders u64
+//!          journal_offset u64 | has_last u8 | last_start u64 | last_crc u32 | orders u64
 //! order:   id u64 | side u8 | price i64 | qty u64 | post_only u8 | group u16 | action u8   (29 bytes)
 //!          bids best first, then asks best first; oldest first within a price
 //! trailer: crc32 u32 over everything before it
@@ -26,13 +26,15 @@ use thiserror::Error;
 
 use crate::book::BookConfig;
 use crate::command::Stp;
-use crate::journal::{action_byte, byte_action, byte_side, side_byte};
+use crate::journal::{self, action_byte, byte_action, byte_side, side_byte, RecordRef};
 use crate::replay::ReplayStats;
 use crate::types::{OrderId, Price, Qty, Side};
 
 pub const MAGIC: &[u8; 4] = b"LOBS";
-pub const VERSION: u32 = 1;
-const HEADER_LEN: usize = 8 + 8 + 8 + 1 + 8 + 5 * 8 + 8 + 8;
+/// Version 2 added the last covered journal record (D89). A version 1 file is refused,
+/// so recovery replays from the start of the journal instead: slower, still right.
+pub const VERSION: u32 = 2;
+const HEADER_LEN: usize = 8 + 8 + 8 + 1 + 8 + 5 * 8 + 8 + 13 + 8;
 const ORDER_LEN: usize = 29;
 const TRAILER_LEN: usize = 4;
 
@@ -59,6 +61,20 @@ pub struct BookState {
 }
 
 impl BookState {
+    /// FNV-1a of the state's canonical bytes: one number that differs when two books
+    /// would behave differently. The CLI prints it so tests can compare whole books.
+    pub fn digest(&self) -> u64 {
+        let snap = Snapshot {
+            state: self.clone(),
+            stats: ReplayStats::default(),
+            journal_offset: journal::HEADER_LEN as u64,
+            last_record: None,
+        };
+        let mut hash = crate::replay::Fnv64::default();
+        hash.update(&snap.encode());
+        hash.finish()
+    }
+
     /// Whether this is a book some session could have produced. `restore` relies on it:
     /// a book built from a bad state would break its invariants later, far from the cause.
     pub fn validate(&self) -> Result<(), &'static str> {
@@ -118,6 +134,10 @@ pub struct Snapshot {
     pub stats: ReplayStats,
     /// The byte offset in the journal where record `stats.commands` (0-based) starts.
     pub journal_offset: u64,
+    /// The last journal record this snapshot covers (the one ending at `journal_offset`),
+    /// `None` if it covers none. Recovery checks the journal still has it there: a
+    /// snapshot of another journal is refused, not silently applied (D89).
+    pub last_record: Option<RecordRef>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -132,6 +152,10 @@ pub enum SnapshotError {
     Damaged,
     #[error("invalid snapshot: {0}")]
     Invalid(&'static str),
+    /// The journal doesn't hold the record the snapshot says it covers: the snapshot was
+    /// taken from another journal (D89).
+    #[error("snapshot belongs to a different journal")]
+    WrongJournal,
 }
 
 impl Snapshot {
@@ -150,6 +174,9 @@ impl Snapshot {
             u64(&mut buf, v);
         }
         u64(&mut buf, self.journal_offset);
+        buf.push(self.last_record.is_some() as u8);
+        u64(&mut buf, self.last_record.map_or(0, |r| r.start));
+        buf.extend_from_slice(&self.last_record.map_or(0, |r| r.crc).to_le_bytes());
         u64(&mut buf, s.orders.len() as u64);
         for o in &s.orders {
             u64(&mut buf, o.id.0);
@@ -200,6 +227,13 @@ impl Snapshot {
             digest: r.u64(),
         };
         let journal_offset = r.u64();
+        let last_record = match (r.u8(), r.u64(), r.u32()) {
+            (0, 0, 0) if journal_offset == journal::HEADER_LEN as u64 => None,
+            (1, start, crc) if (journal::HEADER_LEN as u64..journal_offset).contains(&start) => {
+                Some(RecordRef { start, crc })
+            }
+            _ => return Err(invalid("bad journal position")),
+        };
         let count = r.u64();
         // Checked before allocating, so a huge count in a small file can't ask for memory.
         if count != (r.0.len() / ORDER_LEN) as u64 || r.0.len() % ORDER_LEN != 0 {
@@ -244,7 +278,18 @@ impl Snapshot {
             state,
             stats,
             journal_offset,
+            last_record,
         })
+    }
+
+    /// Whether `journal` (a whole journal file's bytes) still holds this snapshot's last
+    /// record, intact, ending exactly at `journal_offset` (D89).
+    pub fn matches_journal(&self, journal: &[u8]) -> bool {
+        match self.last_record {
+            None => self.journal_offset == journal::HEADER_LEN as u64 && journal.len() >= 8,
+            Some(want) => journal::record_at(journal, want.start)
+                .is_some_and(|(got, end)| got == want && end == self.journal_offset),
+        }
     }
 }
 
@@ -256,6 +301,12 @@ impl Bytes<'_> {
         let b = self.0[0];
         self.0 = &self.0[1..];
         b
+    }
+
+    fn u32(&mut self) -> u32 {
+        let (v, rest) = self.0.split_at(4);
+        self.0 = rest;
+        u32::from_le_bytes(v.try_into().unwrap())
     }
 
     fn u64(&mut self) -> u64 {
@@ -312,6 +363,10 @@ mod tests {
                 digest: 0xdead_beef_0123_4567,
             },
             journal_offset: 1234,
+            last_record: Some(RecordRef {
+                start: 1207,
+                crc: 0x0123_4567,
+            }),
         }
     }
 
@@ -378,7 +433,7 @@ mod tests {
     fn encoding_round_trips_and_has_the_documented_size() {
         let snap = snapshot(book::<FastBook>(SESSION).state());
         let bytes = snap.encode();
-        assert_eq!(bytes.len(), 89 + 6 * 29 + 4);
+        assert_eq!(bytes.len(), 102 + 6 * 29 + 4);
         assert_eq!(Snapshot::decode(&bytes), Ok(snap));
         let empty = snapshot(RefBook::new().state());
         assert_eq!(Snapshot::decode(&empty.encode()), Ok(empty));
@@ -428,6 +483,67 @@ mod tests {
             Snapshot::decode(&b),
             Err(SnapshotError::Invalid("bad last id"))
         );
+    }
+
+    #[test]
+    fn the_journal_position_is_checked() {
+        let edited = |at: usize, v: u8| {
+            let mut b = snapshot(book::<RefBook>(SESSION).state()).encode();
+            b[at] = v;
+            let n = b.len() - TRAILER_LEN;
+            let crc = crc32fast::hash(&b[..n]);
+            b[n..].copy_from_slice(&crc.to_le_bytes());
+            Snapshot::decode(&b)
+        };
+        // journal_offset at 73, has_last at 81, last_start at 82, last_crc at 90.
+        let bad = Err(SnapshotError::Invalid("bad journal position"));
+        assert_eq!(
+            edited(81, 0),
+            bad,
+            "no last record, but an offset past the header"
+        );
+        assert_eq!(
+            edited(89, 1),
+            bad,
+            "the last record starts after the offset"
+        );
+        assert_eq!(
+            edited(82, 0).map(|s| s.last_record.unwrap().start),
+            Ok(1207 - 0xb7)
+        );
+    }
+
+    #[test]
+    fn a_snapshot_matches_only_its_own_journal() {
+        let take = |cmds: &[Command]| {
+            let mut w = crate::journal::JournalWriter::new(Vec::new()).unwrap();
+            for c in cmds {
+                w.append(c).unwrap();
+            }
+            let (offset, last) = (w.position(), w.last_record());
+            let snap = Snapshot {
+                journal_offset: offset,
+                last_record: last,
+                ..snapshot(RefBook::new().state())
+            };
+            (snap, w.finish().unwrap())
+        };
+        let cmds = parse(SESSION);
+        let (snap, bytes) = take(&cmds[..6]);
+        let (_, longer) = take(&cmds);
+        assert!(snap.matches_journal(&bytes) && snap.matches_journal(&longer));
+        let mut flipped = longer.clone();
+        flipped[snap.journal_offset as usize - 1] ^= 1;
+        assert!(
+            !snap.matches_journal(&flipped),
+            "the covered record is damaged"
+        );
+        let (_, other) = take(&parse(&["limit 1 buy 9 9"; 6]));
+        assert!(!snap.matches_journal(&other));
+        let (empty, header) = take(&[]);
+        assert_eq!(empty.last_record, None);
+        assert!(empty.matches_journal(&header) && empty.matches_journal(&longer));
+        assert!(!empty.matches_journal(&header[..7]));
     }
 
     #[test]

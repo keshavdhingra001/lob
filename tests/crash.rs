@@ -13,19 +13,22 @@ use std::time::Duration;
 use lob::gen::Generator;
 use lob::journal::JournalWriter;
 use lob::replay::replay;
-use lob::{Command, RefBook};
+use lob::{Command, OrderBook, RefBook};
 
 const LOB: &str = env!("CARGO_BIN_EXE_lob");
 
-fn digest_of(commands: &[Command]) -> String {
-    format!(
-        "{:016x}",
-        replay(&mut RefBook::new(), commands, |_| {}).digest
+/// The event digest and book digest of an uninterrupted run, as the CLI prints them.
+fn digest_of(commands: &[Command]) -> (String, String) {
+    let mut book = RefBook::new();
+    let digest = replay(&mut book, commands, |_| {}).digest;
+    (
+        format!("{digest:016x}"),
+        format!("{:016x}", book.state().digest()),
     )
 }
 
-/// Run `lob` to completion and return (commands, digest) from its output.
-fn run(args: &[&Path]) -> (usize, String) {
+/// Run `lob` to completion and return (commands, (digest, book digest)) from its output.
+fn run(args: &[&Path]) -> (usize, (String, String)) {
     let out = Process::new(LOB).args(args).output().unwrap();
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(
@@ -37,7 +40,10 @@ fn run(args: &[&Path]) -> (usize, String) {
         let line = text.lines().find(|l| l.starts_with(key)).unwrap();
         line.split_whitespace().nth(1).unwrap().to_string()
     };
-    (field("commands").parse().unwrap(), field("digest"))
+    (
+        field("commands").parse().unwrap(),
+        (field("digest"), field("book")),
+    )
 }
 
 #[test]
@@ -103,4 +109,33 @@ fn sigkill_at_any_moment_recovers_to_the_uninterrupted_digest() {
     // And the last snapshot, plus the journal after it, still recovers the whole run.
     let (n, digest) = run(&["recover".as_ref(), &journal, &snap]);
     assert_eq!((n, digest), (commands.len(), digest_of(&commands)));
+}
+
+#[test]
+fn a_restart_refuses_input_the_journal_does_not_start_with() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("crash-input");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let (a, b, journal, snap) = (dir.join("a"), dir.join("b"), dir.join("j"), dir.join("s"));
+    fs::write(&a, "limit 1 buy 5 100\nlimit 2 buy 5 99\n").unwrap();
+    fs::write(
+        &b,
+        "limit 1 sell 5 100\nlimit 2 sell 5 101\nlimit 3 sell 1 102\n",
+    )
+    .unwrap();
+    assert_eq!(run(&["engine".as_ref(), &a, &journal, &snap]).0, 2);
+    let out = Process::new(LOB)
+        .arg("engine")
+        .args([&b, &journal, &snap])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("a different input?"));
+    // The input with more commands after the journaled ones is fine.
+    fs::write(
+        &a,
+        "limit 1 buy 5 100\nlimit 2 buy 5 99\nlimit 3 sell 1 99\n",
+    )
+    .unwrap();
+    assert_eq!(run(&["engine".as_ref(), &a, &journal, &snap]).0, 3);
 }

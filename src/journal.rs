@@ -27,7 +27,7 @@ use crate::types::{OrderId, Price, Qty, Side};
 
 pub const MAGIC: &[u8; 4] = b"LOBJ";
 pub const VERSION: u32 = 2;
-const HEADER_LEN: usize = 8;
+pub const HEADER_LEN: usize = 8;
 /// crc32 + len.
 const RECORD_HEADER_LEN: usize = 6;
 
@@ -58,11 +58,33 @@ pub struct Journal {
     pub torn_tail: Option<u64>,
 }
 
+/// Where a record starts and the CRC it carries: enough to recognise it again. A snapshot
+/// names the last record it covers this way, so recovery can tell its journal from
+/// another one (D89).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecordRef {
+    pub start: u64,
+    pub crc: u32,
+}
+
+/// The intact record starting at `start` in `bytes`: its reference and where it ends.
+/// `None` if it's cut short or fails its checksum.
+pub fn record_at(bytes: &[u8], start: u64) -> Option<(RecordRef, u64)> {
+    let rest = bytes.get(usize::try_from(start).ok()?..)?;
+    let header = rest.get(..RECORD_HEADER_LEN)?;
+    let crc = u32::from_le_bytes(header[..4].try_into().unwrap());
+    let end = RECORD_HEADER_LEN + u16::from_le_bytes([header[4], header[5]]) as usize;
+    let covered = rest.get(4..end)?;
+    (crc32fast::hash(covered) == crc).then_some((RecordRef { start, crc }, start + end as u64))
+}
+
 pub struct JournalWriter<W: Write> {
     out: W,
     buf: Vec<u8>,
     /// Bytes in the file so far, header included: where the next record starts.
     len: u64,
+    /// The last record written, `None` while the journal has none.
+    last: Option<RecordRef>,
 }
 
 impl<W: Write> JournalWriter<W> {
@@ -74,22 +96,30 @@ impl<W: Write> JournalWriter<W> {
             out,
             buf: Vec::with_capacity(64),
             len: HEADER_LEN as u64,
+            last: None,
         })
     }
 
-    /// Append to a journal that already holds `len` valid bytes, header included. `out`
-    /// must be positioned at `len` (after a recovery truncated any torn tail, D79).
-    pub fn resume(out: W, len: u64) -> Self {
+    /// Append to a journal that already holds `len` valid bytes, header included, the
+    /// last of them in record `last`. `out` must be positioned at `len` (after a
+    /// recovery truncated any torn tail, D79).
+    pub fn resume(out: W, len: u64, last: Option<RecordRef>) -> Self {
         JournalWriter {
             out,
             buf: Vec::with_capacity(64),
             len,
+            last,
         }
     }
 
     /// Where the next record will start.
     pub fn position(&self) -> u64 {
         self.len
+    }
+
+    /// The last record written (or found on resume).
+    pub fn last_record(&self) -> Option<RecordRef> {
+        self.last
     }
 
     /// Flush buffered records to `out`, keeping the writer.
@@ -108,10 +138,15 @@ impl<W: Write> JournalWriter<W> {
         let mut crc = crc32fast::Hasher::new();
         crc.update(&len_bytes);
         crc.update(&payload[..len]);
+        let crc = crc.finalize();
         self.buf.clear();
-        self.buf.extend_from_slice(&crc.finalize().to_le_bytes());
+        self.buf.extend_from_slice(&crc.to_le_bytes());
         self.buf.extend_from_slice(&len_bytes);
         self.buf.extend_from_slice(&payload[..len]);
+        self.last = Some(RecordRef {
+            start: self.len,
+            crc,
+        });
         self.len += self.buf.len() as u64;
         self.out.write_all(&self.buf)
     }

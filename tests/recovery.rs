@@ -41,10 +41,17 @@ fn journal(commands: &[Command]) -> (Vec<u8>, Vec<u64>) {
 fn snapshot_after(commands: &[Command], starts: &[u64], k: usize) -> Snapshot {
     let mut book = RefBook::with_config(CONFIG);
     let stats = replay(&mut book, &commands[..k], |_| {});
+    // The engine's writer knows its last record; a writer over the same prefix does too.
+    let mut w = JournalWriter::new(Vec::new()).unwrap();
+    for cmd in &commands[..k] {
+        w.append(cmd).unwrap();
+    }
+    assert_eq!(w.position(), starts[k]);
     Snapshot {
         state: book.state(),
         stats,
         journal_offset: starts[k],
+        last_record: w.last_record(),
     }
 }
 
@@ -80,9 +87,16 @@ fn check<B: OrderBook>(
     let mut r = recover::<B>(bytes, snap, CONFIG, |b| events.extend_from_slice(b))
         .map_err(|e| e.to_string())?;
     let kept = r.recorder.stats().commands as usize;
-    // Recovery keeps exactly the complete records and cuts the rest.
-    if starts[kept] != r.journal_end || r.truncated != bytes.len() as u64 - r.journal_end {
-        return Err(format!("kept {kept} records but ends at {}", r.journal_end));
+    // Recovery keeps exactly the records wholly inside the cut, and cuts the rest.
+    let complete = starts.iter().filter(|&&s| s <= bytes.len() as u64).count() - 1;
+    if kept != complete || r.journal_end != starts[kept] {
+        return Err(format!(
+            "kept {kept} records (want {complete}), ends at {}",
+            r.journal_end
+        ));
+    }
+    if r.last_record.map(|l| l.start) != kept.checked_sub(1).map(|i| starts[i]) {
+        return Err(format!("last record {:?} after {kept}", r.last_record));
     }
     let skipped = snap.map_or(0, |s| s.stats.events) as usize;
     for cmd in &commands[kept..] {
@@ -205,11 +219,8 @@ fn files_recover_truncate_the_torn_tail_and_survive_a_bad_snapshot() {
     fs::write(&jpath, &bytes[..cut as usize]).unwrap();
     write_snapshot(&spath, &snapshot_after(&commands, &starts, 40)).unwrap();
     let r = recover_files::<FastBook>(&jpath, &spath, CONFIG, |_| {}).unwrap();
-    assert!(r.recovered.from_snapshot && r.bad_snapshot.is_none());
-    assert_eq!(
-        (r.recovered.replayed, r.recovered.recorder.stats()),
-        (20, want)
-    );
+    assert!(r.from_snapshot && r.bad_snapshot.is_none());
+    assert_eq!((r.replayed, r.recorder.stats()), (20, want));
     assert_eq!(
         fs::metadata(&jpath).unwrap().len(),
         starts[60],
@@ -222,14 +233,95 @@ fn files_recover_truncate_the_torn_tail_and_survive_a_bad_snapshot() {
     s[20] ^= 1;
     fs::write(&spath, s).unwrap();
     let r = recover_files::<RefBook>(&jpath, &spath, CONFIG, |_| {}).unwrap();
-    assert!(!r.recovered.from_snapshot && r.bad_snapshot.is_some());
-    assert_eq!(
-        (r.recovered.replayed, r.recovered.recorder.stats()),
-        (60, want)
-    );
+    assert!(!r.from_snapshot && r.bad_snapshot.is_some());
+    assert_eq!((r.replayed, r.recorder.stats()), (60, want));
 
     // No snapshot at all.
     fs::remove_file(&spath).unwrap();
     let r = recover_files::<RefBook>(&jpath, &spath, CONFIG, |_| {}).unwrap();
-    assert_eq!(r.recovered.recorder.stats(), want);
+    assert_eq!(r.recorder.stats(), want);
+}
+
+/// Two journals whose records all have one size: a snapshot of one lands on a record
+/// boundary of the other. Both start with `accepted 1..=n`, so their event streams agree
+/// too: only the book tells them apart.
+fn same_shape(side: &str, price: u32, n: u64) -> Vec<Command> {
+    (1..=n)
+        .map(|i| format!("limit {i} {side} 1 {price}").parse().unwrap())
+        .collect()
+}
+
+#[test]
+fn a_snapshot_of_another_journal_is_set_aside() {
+    let a = same_shape("buy", 10, 100);
+    let b = same_shape("sell", 11, 200);
+    let (a_bytes, a_starts) = journal(&a);
+    let (b_bytes, _) = journal(&b);
+    let stale = snapshot_after(&a, &a_starts, 100);
+    assert!(stale.journal_offset < b_bytes.len() as u64);
+
+    let mut truth = RefBook::with_config(CONFIG);
+    let want = replay(&mut truth, &b, |_| {});
+    let r = recover::<FastBook>(&b_bytes, Some(&stale), CONFIG, |_| {}).unwrap();
+    assert!(!r.from_snapshot);
+    assert_eq!(
+        r.bad_snapshot,
+        Some(lob::snapshot::SnapshotError::WrongJournal)
+    );
+    assert_eq!((r.recorder.stats(), r.book.state()), (want, truth.state()));
+
+    // Past the end of a shorter journal, with the named record's header still there but
+    // carrying another checksum: another journal, set aside.
+    let (b100, _) = journal(&same_shape("sell", 11, 100));
+    let torn = &b100[..b100.len() - 5];
+    assert!(torn.len() < stale.journal_offset as usize);
+    let r = recover::<RefBook>(torn, Some(&stale), CONFIG, |_| {}).unwrap();
+    assert_eq!(
+        r.bad_snapshot,
+        Some(lob::snapshot::SnapshotError::WrongJournal)
+    );
+    assert_eq!((r.recorder.stats().commands, r.truncated), (99, 28));
+    // Past the end, with nothing of the named record left: it can't be told apart from a
+    // journal that lost its tail, so recovery refuses (D79) rather than guess.
+    let (b50, _) = journal(&same_shape("sell", 11, 50));
+    assert!(matches!(
+        recover::<RefBook>(&b50, Some(&stale), CONFIG, |_| {}),
+        Err(RecoveryError::SnapshotPastJournal { .. })
+    ));
+    // A journal that holds the snapshot's own prefix still uses it.
+    assert!(
+        recover::<RefBook>(&a_bytes, Some(&stale), CONFIG, |_| {})
+            .unwrap()
+            .from_snapshot
+    );
+}
+
+#[test]
+fn a_new_journal_removes_a_stale_snapshot() {
+    use lob::engine::{Engine, Sync};
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("stale-snapshot");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let (ja, jb, s) = (dir.join("ja"), dir.join("jb"), dir.join("s"));
+    let a = same_shape("buy", 10, 100);
+    let b = same_shape("sell", 11, 200);
+
+    let (mut engine, _) =
+        Engine::<FastBook>::open(&ja, &s, CONFIG, Sync::None, 50, |_| {}).unwrap();
+    engine.process(&a, |_| {}).unwrap();
+    engine.snapshot().unwrap();
+    engine.close().unwrap();
+    assert!(s.exists());
+
+    // A new journal at another path, the same snapshot path, and a crash before the
+    // first snapshot of its own.
+    let (mut engine, opened) =
+        Engine::<FastBook>::open(&jb, &s, CONFIG, Sync::None, 0, |_| {}).unwrap();
+    assert!(opened.fresh && !s.exists(), "the stale snapshot is gone");
+    engine.process(&b, |_| {}).unwrap();
+    drop(engine);
+    let mut truth = RefBook::with_config(CONFIG);
+    replay(&mut truth, &b, |_| {});
+    let r = recover_files::<RefBook>(&jb, &s, CONFIG, |_| {}).unwrap();
+    assert_eq!(r.book.state(), truth.state());
 }

@@ -9,14 +9,14 @@
 //! Opening an existing journal recovers first (D79), so a restart after a crash is the
 //! same call as a clean start.
 
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use crate::book::{BookConfig, OrderBook};
 use crate::command::Command;
 use crate::journal::JournalWriter;
-use crate::recovery::{recover_files, sync_dir, write_snapshot, FileRecovery, RecoveryError};
+use crate::recovery::{recover_files, sync_dir, write_snapshot, RecoveryError};
 use crate::replay::{Recorder, ReplayStats};
 use crate::snapshot::{Snapshot, SnapshotError};
 
@@ -67,23 +67,26 @@ impl<B: OrderBook> Engine<B> {
     ) -> Result<(Self, Opened), RecoveryError> {
         let exists = journal.metadata().is_ok_and(|m| m.len() >= 8);
         let (book, recorder, writer, opened) = if exists {
-            let FileRecovery {
-                recovered: r,
-                bad_snapshot,
-            } = recover_files::<B>(journal, snapshot, config, sink)?;
+            let r = recover_files::<B>(journal, snapshot, config, sink)?;
             let mut file = OpenOptions::new().write(true).open(journal)?;
             file.seek(SeekFrom::Start(r.journal_end))?;
-            let writer = JournalWriter::resume(BufWriter::new(file), r.journal_end);
+            let writer = JournalWriter::resume(BufWriter::new(file), r.journal_end, r.last_record);
             let opened = Opened {
                 fresh: false,
                 from_snapshot: r.from_snapshot,
                 replayed: r.replayed,
                 truncated: r.truncated,
-                bad_snapshot,
+                bad_snapshot: r.bad_snapshot,
             };
             (r.book, r.recorder, writer, opened)
         } else {
-            // A file shorter than the header is a crash during creation: start over.
+            // A file shorter than the header is a crash during creation: start over. A
+            // snapshot left at `snapshot` belongs to some other journal: remove it before
+            // anything is written, so no later recovery can apply it to this one (D89).
+            match fs::remove_file(snapshot) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
+                _ => {}
+            }
             let mut writer = JournalWriter::new(BufWriter::new(File::create(journal)?))?;
             writer.flush()?;
             writer.get_ref().get_ref().sync_all()?;
@@ -144,6 +147,7 @@ impl<B: OrderBook> Engine<B> {
             state: self.book.state(),
             stats: self.recorder.stats(),
             journal_offset: self.journal.position(),
+            last_record: self.journal.last_record(),
         };
         write_snapshot(&self.snapshot_path, &snap)?;
         self.since_snapshot = 0;

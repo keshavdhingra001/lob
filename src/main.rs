@@ -297,8 +297,15 @@ fn engine(
     .map_err(|e| format!("{journal}: {e}"))?;
     let recovery = started.elapsed();
     print_opened(&opened);
-    let done = engine.stats().commands as usize;
-    let todo = commands.get(done..).unwrap_or_default();
+    // The journal must hold a prefix of the input, or this isn't the same session.
+    let journaled = load_journal(journal)?.commands;
+    if !commands.starts_with(&journaled) {
+        return Err(format!(
+            "{journal} holds {} commands that aren't the start of {input}: a different input?",
+            journaled.len()
+        ));
+    }
+    let todo = &commands[journaled.len()..];
     let err = |e: io::Error| format!("{journal}: {e}");
     let (mut snapshots, mut pause_max, mut pause_total) = (0u32, Duration::ZERO, Duration::ZERO);
     let start = Instant::now();
@@ -315,8 +322,10 @@ fn engine(
     }
     let secs = start.elapsed().as_secs_f64();
     let syncs = engine.syncs;
+    let book = engine.book.state().digest();
     let stats = engine.close().map_err(err)?;
     print_stats(&stats);
+    println!("book     {book:016x}");
     println!(
         "time     {secs:.3} s for {} new commands ({:.0}/s), recovery {:.3} s, {syncs} fsyncs",
         todo.len(),
@@ -346,12 +355,13 @@ fn recover(journal: &str, snap: &str, book: &str) -> Result<(), String> {
         let secs = start.elapsed().as_secs_f64();
         print_opened(&Opened {
             fresh: false,
-            from_snapshot: r.recovered.from_snapshot,
-            replayed: r.recovered.replayed,
-            truncated: r.recovered.truncated,
+            from_snapshot: r.from_snapshot,
+            replayed: r.replayed,
+            truncated: r.truncated,
             bad_snapshot: r.bad_snapshot,
         });
-        print_stats(&r.recovered.recorder.stats());
+        print_stats(&r.recorder.stats());
+        println!("book     {:016x}", r.book.state().digest());
         println!("time     {secs:.3} s");
         Ok(())
     }

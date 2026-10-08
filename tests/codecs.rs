@@ -312,7 +312,11 @@ fn book_snapshot_bytes() -> impl Strategy<Value = Vec<u8>> {
         BookSnapshot {
             state: book.state(),
             stats,
-            journal_offset: 8,
+            journal_offset: 1234,
+            last_record: Some(lob::journal::RecordRef {
+                start: 1200,
+                crc: 0xabcd_0123,
+            }),
         }
         .encode()
     });

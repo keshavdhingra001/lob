@@ -11,6 +11,8 @@
 //! - A missing or damaged snapshot falls back to replaying everything: slower, never wrong.
 //! - A snapshot pointing past the end of the journal refuses: it describes commands the
 //!   journal lost, so recovering would contradict what was already published.
+//! - A snapshot of another journal (its last record isn't in this one) is set aside, and
+//!   recovery starts from zero (D89).
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -19,7 +21,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::book::{BookConfig, OrderBook};
-use crate::journal::{read_journal_from, JournalError};
+use crate::journal::{read_journal_from, record_at, JournalError, RecordRef, HEADER_LEN};
 use crate::replay::Recorder;
 use crate::snapshot::{Snapshot, SnapshotError};
 
@@ -41,37 +43,65 @@ pub struct Recovered<B> {
     pub recorder: Recorder,
     /// Where the journal's valid records end: the next append goes here.
     pub journal_end: u64,
+    /// The last valid record, for the writer that appends after it (D89).
+    pub last_record: Option<RecordRef>,
     /// Records replayed after the snapshot (all of them without one).
     pub replayed: u64,
     /// Whether a snapshot was used.
     pub from_snapshot: bool,
+    /// Set when a snapshot existed but couldn't be used, so recovery started from zero.
+    pub bad_snapshot: Option<SnapshotError>,
     /// Bytes of torn tail cut off the journal.
     pub truncated: u64,
 }
 
 /// Recover from journal bytes and an optional snapshot. Events replayed after the snapshot
 /// go to `sink`. `config` is the engine's; a snapshot taken under other rules is refused.
+///
+/// A snapshot whose last record isn't in this journal is set aside, with a warning, and
+/// recovery starts from zero (D89): it belongs to another journal. If that record lies
+/// past the end of the journal instead, the journal lost commands the snapshot covers,
+/// and recovery refuses (D79).
 pub fn recover<B: OrderBook>(
     journal: &[u8],
     snapshot: Option<&Snapshot>,
     config: BookConfig,
     mut sink: impl FnMut(&[u8]),
 ) -> Result<Recovered<B>, RecoveryError> {
-    let (mut book, mut recorder, offset) = match snapshot {
-        Some(snap) => {
-            if snap.state.config != config {
-                return Err(RecoveryError::ConfigMismatch);
-            }
-            if snap.journal_offset > journal.len() as u64 {
-                return Err(RecoveryError::SnapshotPastJournal {
-                    offset: snap.journal_offset,
-                    len: journal.len() as u64,
-                });
-            }
-            let book = B::from_state(&snap.state).expect("decode validated the state");
-            (book, Recorder::resume(snap.stats), snap.journal_offset)
+    let mut bad_snapshot = None;
+    let mut start = None;
+    if let Some(snap) = snapshot {
+        if snap.state.config != config {
+            return Err(RecoveryError::ConfigMismatch);
         }
-        None => (B::with_config(config), Recorder::default(), 8),
+        if snap.matches_journal(journal) {
+            match B::from_state(&snap.state) {
+                Ok(book) => start = Some((book, snap)),
+                Err(reason) => bad_snapshot = Some(SnapshotError::Invalid(reason)),
+            }
+        } else if snap.journal_offset > journal.len() as u64 && lost_tail(snap, journal) {
+            return Err(RecoveryError::SnapshotPastJournal {
+                offset: snap.journal_offset,
+                len: journal.len() as u64,
+            });
+        } else {
+            bad_snapshot = Some(SnapshotError::WrongJournal);
+        }
+    }
+    let from_snapshot = start.is_some();
+    let (mut book, mut recorder, offset, mut last_record) = match start {
+        Some((book, snap)) => (
+            book,
+            Recorder::resume(snap.stats),
+            snap.journal_offset,
+            snap.last_record,
+        ),
+        None => (
+            B::with_config(config),
+            Recorder::default(),
+            HEADER_LEN as u64,
+            None,
+        ),
     };
     let rest = read_journal_from(journal, offset)?;
     for cmd in &rest.commands {
@@ -79,14 +109,35 @@ pub fn recover<B: OrderBook>(
     }
     recorder.flush(&mut sink);
     let journal_end = rest.torn_tail.unwrap_or(journal.len() as u64);
+    // Walk the record headers just replayed to find the last one (no decoding).
+    let mut pos = offset;
+    while pos < journal_end {
+        let (record, end) = record_at(journal, pos).expect("replayed records are intact");
+        last_record = Some(record);
+        pos = end;
+    }
     Ok(Recovered {
         book,
         recorder,
         journal_end,
+        last_record,
         replayed: rest.commands.len() as u64,
-        from_snapshot: snapshot.is_some(),
+        from_snapshot,
+        bad_snapshot,
         truncated: journal.len() as u64 - journal_end,
     })
+}
+
+/// Whether the snapshot's last record is missing because the journal ends before it, or
+/// is cut short where it still begins with the same checksum: the journal lost its tail.
+fn lost_tail(snap: &Snapshot, journal: &[u8]) -> bool {
+    let Some(want) = snap.last_record else {
+        return false;
+    };
+    match journal.get(want.start as usize..want.start as usize + 4) {
+        None => true,
+        Some(crc) => u32::from_le_bytes(crc.try_into().unwrap()) == want.crc,
+    }
 }
 
 /// Read a snapshot file. `Ok(None)` if there isn't one.
@@ -121,35 +172,27 @@ pub fn sync_dir(path: &Path) -> io::Result<()> {
     File::open(dir)?.sync_all()
 }
 
-/// What `recover_files` did, for the CLI to report.
-pub struct FileRecovery<B> {
-    pub recovered: Recovered<B>,
-    /// Set when a snapshot file existed but was unusable, so recovery started from zero.
-    pub bad_snapshot: Option<SnapshotError>,
-}
-
 /// Recover from files: read both, recover, and cut any torn tail off the journal file
-/// (made durable before returning, D79).
+/// (made durable before returning, D79). An unreadable snapshot is reported in
+/// `bad_snapshot`, and recovery starts from zero.
 pub fn recover_files<B: OrderBook>(
     journal: &Path,
     snapshot: &Path,
     config: BookConfig,
     sink: impl FnMut(&[u8]),
-) -> Result<FileRecovery<B>, RecoveryError> {
-    let (snap, bad_snapshot) = match read_snapshot(snapshot)? {
+) -> Result<Recovered<B>, RecoveryError> {
+    let (snap, unreadable) = match read_snapshot(snapshot)? {
         Some(Ok(snap)) => (Some(snap), None),
         Some(Err(e)) => (None, Some(e)),
         None => (None, None),
     };
     let bytes = fs::read(journal)?;
-    let recovered = recover(&bytes, snap.as_ref(), config, sink)?;
+    let mut recovered = recover(&bytes, snap.as_ref(), config, sink)?;
+    recovered.bad_snapshot = recovered.bad_snapshot.or(unreadable);
     if recovered.truncated > 0 {
         let file = OpenOptions::new().write(true).open(journal)?;
         file.set_len(recovered.journal_end)?;
         file.sync_all()?;
     }
-    Ok(FileRecovery {
-        recovered,
-        bad_snapshot,
-    })
+    Ok(recovered)
 }
