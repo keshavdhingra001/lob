@@ -180,9 +180,9 @@ mod tests {
     }
 
     #[test]
-    fn event_records_have_fixed_sizes() {
+    fn event_records_have_fixed_sizes_and_distinct_tags() {
         let id = OrderId(1);
-        let sizes: Vec<usize> = [
+        let sizes: Vec<(usize, u8)> = [
             Event::Accepted { id },
             Event::Rejected {
                 id,
@@ -213,10 +213,14 @@ mod tests {
         .map(|e| {
             let mut buf = Vec::new();
             encode_event(7, e, &mut buf);
-            buf.len()
+            (buf.len(), buf[8])
         })
         .collect();
-        assert_eq!(sizes, [17, 18, 33, 42, 25, 25]);
+        assert_eq!(
+            sizes,
+            [(17, 1), (18, 2), (33, 3), (42, 4), (25, 5), (25, 6)],
+            "(size, tag) per event kind: a shared tag would let the digest confuse two kinds"
+        );
     }
 
     #[test]
