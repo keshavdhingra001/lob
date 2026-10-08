@@ -27,7 +27,7 @@ pub mod scenario;
 pub mod types;
 
 pub use book::{BookConfig, Level, OrderBook};
-pub use command::{Command, Event, RejectReason, TimeInForce};
+pub use command::{Command, Event, RejectReason, Stp, StpAction, TimeInForce};
 pub use error::ParseError;
 pub use fast::FastBook;
 pub use reference::RefBook;

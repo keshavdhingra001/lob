@@ -135,7 +135,7 @@ impl Ledger {
                         .ok_or_else(|| format!("{event}: order {id} only had {open} open"))?;
                 }
             }
-            Event::Cancelled { id, remaining } => {
+            Event::Cancelled { id, remaining } | Event::SelfTradeCancelled { id, remaining } => {
                 let open = self.open.remove(&id).unwrap_or(0);
                 if open != remaining.0 || open == 0 {
                     return Err(format!(

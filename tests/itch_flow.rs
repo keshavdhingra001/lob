@@ -74,6 +74,7 @@ fn limit(id: u64, side: Side, qty: u64, price: i64, tif: lob::TimeInForce) -> Co
         qty: Qty(qty),
         price: Price(price),
         tif,
+        stp: None,
     }
 }
 

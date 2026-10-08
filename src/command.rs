@@ -7,13 +7,14 @@
 //! Text format (D6), one command per line, used by the REPL and scenario files:
 //!
 //! ```text
-//! limit  <id> <buy|sell> <qty> <price> [gtc|ioc|fok|post]
-//! market <id> <buy|sell> <qty>
+//! limit  <id> <buy|sell> <qty> <price> [gtc|ioc|fok|post] [g=<group> stp=<cn|co|cb>]
+//! market <id> <buy|sell> <qty> [g=<group> stp=<cn|co|cb>]
 //! modify <id> <qty> <price>
 //! cancel <id>
 //! ```
 
 use std::fmt;
+use std::num::NonZeroU16;
 use std::str::FromStr;
 
 use crate::error::ParseError;
@@ -28,9 +29,15 @@ pub enum Command {
         qty: Qty,
         price: Price,
         tif: TimeInForce,
+        stp: Option<Stp>,
     },
     /// Match against the opposite side at any price. Never rests.
-    Market { id: OrderId, side: Side, qty: Qty },
+    Market {
+        id: OrderId,
+        side: Side,
+        qty: Qty,
+        stp: Option<Stp>,
+    },
     /// Change a resting order's open quantity and/or price (D11).
     Modify { id: OrderId, qty: Qty, price: Price },
     /// Remove a resting order.
@@ -49,6 +56,25 @@ pub enum TimeInForce {
     Fok,
     /// Only ever add liquidity: rejected if it would trade on arrival.
     PostOnly,
+}
+
+/// Self-trade prevention (D67): two orders with the same group never trade with each other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Stp {
+    pub group: NonZeroU16,
+    /// What happens instead of a self-trade. The incoming order's action applies (D69).
+    pub action: StpAction,
+}
+
+/// D68.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum StpAction {
+    /// Cancel the incoming order's remaining quantity; the resting order stays.
+    CancelNewest,
+    /// Cancel the resting order and keep matching.
+    CancelOldest,
+    /// Cancel both.
+    CancelBoth,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +98,9 @@ pub enum Event {
     /// The order is done with `remaining` unfilled: a user cancel, the unfillable rest
     /// of a market or IOC order, or a FOK order that couldn't fill completely.
     Cancelled { id: OrderId, remaining: Qty },
+    /// The order is done with `remaining` unfilled, cancelled by self-trade prevention
+    /// instead of trading with an order of its own group (D70, D73).
+    SelfTradeCancelled { id: OrderId, remaining: Qty },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,6 +136,7 @@ impl FromStr for Command {
         let (&name, args) = tokens.split_first().ok_or(ParseError::Empty)?;
         match name {
             "limit" => {
+                let (args, stp) = split_stp(args)?;
                 // The time in force is optional, so `limit` takes 4 or 5 arguments.
                 if args.len() != 5 {
                     expect_args("limit", args, 4)?;
@@ -117,14 +147,17 @@ impl FromStr for Command {
                     qty: Qty(parse_num("qty", args[2])?),
                     price: Price(parse_num("price", args[3])?),
                     tif: args.get(4).map_or(Ok(TimeInForce::Gtc), |s| s.parse())?,
+                    stp,
                 })
             }
             "market" => {
+                let (args, stp) = split_stp(args)?;
                 expect_args("market", args, 3)?;
                 Ok(Command::Market {
                     id: OrderId(parse_num("id", args[0])?),
                     side: parse_side(args[1])?,
                     qty: Qty(parse_num("qty", args[2])?),
+                    stp,
                 })
             }
             "modify" => {
@@ -158,6 +191,40 @@ impl FromStr for TimeInForce {
             _ => Err(ParseError::BadTimeInForce(s.to_string())),
         }
     }
+}
+
+impl FromStr for StpAction {
+    type Err = ParseError;
+
+    fn from_str(s: &str) -> Result<Self, ParseError> {
+        match s {
+            "cn" => Ok(StpAction::CancelNewest),
+            "co" => Ok(StpAction::CancelOldest),
+            "cb" => Ok(StpAction::CancelBoth),
+            _ => Err(ParseError::BadStp(s.to_string())),
+        }
+    }
+}
+
+/// Split the optional trailing `g=<group> stp=<action>` off a new order's arguments (D73).
+/// Both or neither, in that order, so a grouped command has exactly one spelling.
+fn split_stp<'a>(args: &'a [&'a str]) -> Result<(&'a [&'a str], Option<Stp>), ParseError> {
+    let Some(at) = args.iter().position(|a| a.contains('=')) else {
+        return Ok((args, None));
+    };
+    let (positional, named) = args.split_at(at);
+    let bad = || ParseError::BadStp(named.join(" "));
+    let [group, action] = named else {
+        return Err(bad());
+    };
+    let group = group.strip_prefix("g=").ok_or_else(bad)?;
+    let action = action.strip_prefix("stp=").ok_or_else(bad)?;
+    let stp = Stp {
+        // `NonZeroU16` refuses 0: "no group" is spelled by leaving the pair out.
+        group: parse_num("group", group)?,
+        action: action.parse()?,
+    };
+    Ok((positional, Some(stp)))
 }
 
 fn expect_args(command: &'static str, args: &[&str], expected: usize) -> Result<(), ParseError> {
@@ -198,17 +265,38 @@ impl fmt::Display for Command {
                 qty,
                 price,
                 tif,
+                stp,
             } => {
                 write!(f, "limit {id} {side} {qty} {price}")?;
-                match tif {
-                    TimeInForce::Gtc => Ok(()),
-                    tif => write!(f, " {tif}"),
+                if *tif != TimeInForce::Gtc {
+                    write!(f, " {tif}")?;
                 }
+                write_stp(f, stp)
             }
-            Command::Market { id, side, qty } => write!(f, "market {id} {side} {qty}"),
+            Command::Market { id, side, qty, stp } => {
+                write!(f, "market {id} {side} {qty}")?;
+                write_stp(f, stp)
+            }
             Command::Modify { id, qty, price } => write!(f, "modify {id} {qty} {price}"),
             Command::Cancel { id } => write!(f, "cancel {id}"),
         }
+    }
+}
+
+fn write_stp(f: &mut fmt::Formatter<'_>, stp: &Option<Stp>) -> fmt::Result {
+    match stp {
+        Some(Stp { group, action }) => write!(f, " g={group} stp={action}"),
+        None => Ok(()),
+    }
+}
+
+impl fmt::Display for StpAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            StpAction::CancelNewest => "cn",
+            StpAction::CancelOldest => "co",
+            StpAction::CancelBoth => "cb",
+        })
     }
 }
 
@@ -238,6 +326,9 @@ impl fmt::Display for Event {
                 price,
             } => write!(f, "trade {taker} {maker} {taker_side} {qty} {price}"),
             Event::Cancelled { id, remaining } => write!(f, "cancelled {id} {remaining}"),
+            Event::SelfTradeCancelled { id, remaining } => {
+                write!(f, "stp-cancelled {id} {remaining}")
+            }
         }
     }
 }
@@ -273,6 +364,7 @@ mod tests {
                 qty: Qty(100),
                 price: Price(10025),
                 tif: TimeInForce::Gtc,
+                stp: None,
             })
         );
         assert_eq!(
@@ -281,6 +373,7 @@ mod tests {
                 id: OrderId(2),
                 side: Side::Sell,
                 qty: Qty(50),
+                stp: None,
             })
         );
         assert_eq!(
@@ -348,6 +441,9 @@ mod tests {
             "market 2 sell 50",
             "modify 4 10 10030",
             "cancel 3",
+            "limit 5 buy 1 100 g=7 stp=cn",
+            "limit 5 buy 1 100 ioc g=65535 stp=co",
+            "market 6 sell 2 g=1 stp=cb",
         ] {
             let cmd = parse(line).unwrap();
             assert_eq!(cmd.to_string(), line);
@@ -383,6 +479,46 @@ mod tests {
             parse("market 1 hold 5"),
             Err(ParseError::BadSide("hold".into()))
         );
+    }
+
+    #[test]
+    fn stp_is_a_trailing_pair() {
+        let stp = |line: &str| match parse(line) {
+            Ok(Command::Limit { stp, .. } | Command::Market { stp, .. }) => Ok(stp),
+            Ok(other) => panic!("{other:?}"),
+            Err(e) => Err(e),
+        };
+        assert_eq!(stp("limit 1 buy 1 100"), Ok(None));
+        assert_eq!(
+            stp("market 1 buy 1 g=3 stp=co"),
+            Ok(Some(Stp {
+                group: NonZeroU16::new(3).unwrap(),
+                action: StpAction::CancelOldest,
+            }))
+        );
+        let bad = |s: &str| Err(ParseError::BadStp(s.into()));
+        // Both or neither, group first, and nothing after.
+        assert_eq!(stp("limit 1 buy 1 100 g=3"), bad("g=3"));
+        assert_eq!(stp("limit 1 buy 1 100 stp=cn"), bad("stp=cn"));
+        assert_eq!(stp("limit 1 buy 1 100 stp=cn g=3"), bad("stp=cn g=3"));
+        assert_eq!(
+            stp("limit 1 buy 1 100 g=3 stp=cn ioc"),
+            bad("g=3 stp=cn ioc")
+        );
+        assert_eq!(stp("limit 1 buy 1 100 g=3 stp=xx"), bad("xx"));
+        // Group 0 doesn't exist: no group is spelled by leaving the pair out.
+        for group in ["0", "65536", "-1"] {
+            assert_eq!(
+                stp(&format!("limit 1 buy 1 100 g={group} stp=cn")),
+                Err(ParseError::BadNumber {
+                    field: "group",
+                    value: group.into(),
+                })
+            );
+        }
+        // Only new orders carry a group.
+        assert!(parse("cancel 1 g=3 stp=cn").is_err());
+        assert!(parse("modify 1 1 100 g=3 stp=cn").is_err());
     }
 
     #[test]
@@ -435,6 +571,10 @@ mod tests {
                 qty: Qty(5),
                 price: Price(99),
             },
+            Event::SelfTradeCancelled {
+                id: OrderId(4),
+                remaining: Qty(6),
+            },
         ];
         let lines: Vec<String> = events.iter().map(|e| e.to_string()).collect();
         assert_eq!(
@@ -445,6 +585,7 @@ mod tests {
                 "cancelled 2 10",
                 "rejected 9 unknown-order",
                 "modified 3 5 99",
+                "stp-cancelled 4 6",
             ]
         );
     }

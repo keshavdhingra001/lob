@@ -12,6 +12,7 @@
 //! 3 modified   id | qty | price
 //! 4 trade      taker | maker | taker_side u8 | qty | price
 //! 5 cancelled  id | remaining
+//! 6 stp-cancelled  id | remaining
 //! ```
 
 use std::time::{Duration, Instant};
@@ -83,6 +84,11 @@ pub fn encode_event(seq: u64, event: &Event, buf: &mut Vec<u8>) {
         }
         Event::Cancelled { id, remaining } => {
             buf.push(5);
+            u64(buf, id.0);
+            u64(buf, remaining.0);
+        }
+        Event::SelfTradeCancelled { id, remaining } => {
+            buf.push(6);
             u64(buf, id.0);
             u64(buf, remaining.0);
         }
@@ -198,6 +204,10 @@ mod tests {
                 id,
                 remaining: Qty(1),
             },
+            Event::SelfTradeCancelled {
+                id,
+                remaining: Qty(1),
+            },
         ]
         .iter()
         .map(|e| {
@@ -206,7 +216,7 @@ mod tests {
             buf.len()
         })
         .collect();
-        assert_eq!(sizes, [17, 18, 33, 42, 25]);
+        assert_eq!(sizes, [17, 18, 33, 42, 25, 25]);
     }
 
     #[test]

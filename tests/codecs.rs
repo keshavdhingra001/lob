@@ -6,11 +6,25 @@ use lob::book::Level;
 use lob::feed::{self, Msg, Snapshot};
 use lob::itch::{self, Body, Header, Message, Stock};
 use lob::journal::{decode_command, encode_command, read_journal, JournalWriter};
-use lob::{Command, OrderId, Price, Qty, Side, TimeInForce};
+use std::num::NonZeroU16;
+
+use lob::{Command, OrderId, Price, Qty, Side, Stp, StpAction, TimeInForce};
 use proptest::prelude::*;
 
 fn side() -> impl Strategy<Value = Side> {
     prop_oneof![Just(Side::Buy), Just(Side::Sell)]
+}
+
+fn stp() -> impl Strategy<Value = Option<Stp>> {
+    let action = prop_oneof![
+        Just(StpAction::CancelNewest),
+        Just(StpAction::CancelOldest),
+        Just(StpAction::CancelBoth),
+    ];
+    prop::option::of((1..=u16::MAX, action).prop_map(|(group, action)| Stp {
+        group: NonZeroU16::new(group).unwrap(),
+        action,
+    }))
 }
 
 fn command() -> impl Strategy<Value = Command> {
@@ -22,17 +36,21 @@ fn command() -> impl Strategy<Value = Command> {
     ];
     let (id, qty, price) = (any::<u64>(), any::<u64>(), any::<i64>());
     prop_oneof![
-        (id, side(), qty, price, tif).prop_map(|(id, side, qty, price, tif)| Command::Limit {
-            id: OrderId(id),
-            side,
-            qty: Qty(qty),
-            price: Price(price),
-            tif,
+        (id, side(), qty, price, tif, stp()).prop_map(|(id, side, qty, price, tif, stp)| {
+            Command::Limit {
+                id: OrderId(id),
+                side,
+                qty: Qty(qty),
+                price: Price(price),
+                tif,
+                stp,
+            }
         }),
-        (id, side(), qty).prop_map(|(id, side, qty)| Command::Market {
+        (id, side(), qty, stp()).prop_map(|(id, side, qty, stp)| Command::Market {
             id: OrderId(id),
             side,
             qty: Qty(qty),
+            stp,
         }),
         (id, qty, price).prop_map(|(id, qty, price)| Command::Modify {
             id: OrderId(id),
@@ -252,6 +270,7 @@ proptest! {
         words in prop::collection::vec(prop_oneof![
             prop::sample::select(vec![
                 "limit", "market", "modify", "cancel", "buy", "sell", "gtc", "ioc", "fok", "post",
+                "g=1", "g=0", "g=", "stp=cn", "stp=co", "stp=cb", "stp=", "=",
                 "-", "", "1e3", "0x10", "18446744073709551616", "-9223372036854775809",
             ]).prop_map(str::to_string),
             any::<i64>().prop_map(|n| n.to_string()),

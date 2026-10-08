@@ -462,8 +462,9 @@ impl OrderBook for FastBook {
                 qty,
                 price,
                 tif,
+                ..
             } => self.submit(id, side, qty, Some(price), tif, out),
-            Command::Market { id, side, qty } => {
+            Command::Market { id, side, qty, .. } => {
                 self.submit(id, side, qty, None, TimeInForce::Gtc, out)
             }
             Command::Modify { id, qty, price } => self.modify(id, qty, price, out),

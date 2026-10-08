@@ -45,12 +45,14 @@ pub fn random_command(rng: &mut Rng, next_id: &mut u64, tick: i64) -> Command {
                 qty,
                 price,
                 tif,
+                stp: None,
             }
         }
         45..=54 => Command::Market {
             id: new_order_id(rng, next_id),
             side,
             qty,
+            stp: None,
         },
         55..=74 => Command::Modify {
             id: OrderId(1 + rng.below(*next_id)),

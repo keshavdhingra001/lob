@@ -66,7 +66,12 @@ impl Kind {
             Command::Limit { .. } => {
                 if events.iter().any(|e| matches!(e, Event::Trade { .. })) {
                     Kind::Cross
-                } else if events.iter().any(|e| matches!(e, Event::Cancelled { .. })) {
+                } else if events.iter().any(|e| {
+                    matches!(
+                        e,
+                        Event::Cancelled { .. } | Event::SelfTradeCancelled { .. }
+                    )
+                }) {
                     Kind::Kill
                 } else {
                     Kind::Rest
@@ -229,6 +234,7 @@ mod tests {
             qty: Qty(qty),
             price: Price(price),
             tif,
+            stp: None,
         }
     }
 
@@ -260,6 +266,7 @@ mod tests {
                 id: OrderId(8),
                 side: Side::Sell,
                 qty: Qty(3),
+                stp: None,
             }, // no bids: accepted, cancelled, still a market
             Command::Modify {
                 id: OrderId(5),

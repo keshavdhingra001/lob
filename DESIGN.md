@@ -1206,3 +1206,58 @@ Each target ran 10 minutes on 2026-10-08 (all with the text dictionary, which on
 | text | 144M | 240k/s | 275 |
 
 `itch` is slower because each input also goes through the buffered stream `Reader`. Not on a quiet machine: fuzzing finds bugs, it doesn't measure time, so load only changes how many inputs it tries.
+
+### D67: Self-trade prevention by STP group (M13)
+- **What:** a new order may carry an STP group, a `u16` the client picks. Two orders in the same group never trade with each other.
+  An order without a group never triggers STP and is never cancelled by it.
+- **Alternatives:** an account id or a firm id on every order. Exchanges key STP on an id the participant assigns (NASDAQ's
+  MPID-level groups, CME's self-match id). The engine doesn't need to know what a group means, only whether two are equal.
+- **Why `u16`:** see D72 (it has to fit the fast book's 32-byte order). 65,535 groups is plenty for one book. Group 0 doesn't exist
+  (`NonZeroU16`), so "no group" costs nothing in `Option<Stp>`. Existing commands, the generator's default flow and ITCH flow carry no
+  group, so their events and the pinned golden digest don't change.
+
+### D68: Three STP actions
+- **What:** when an order is about to trade with a resting order of its own group, one of:
+  - **cancel newest (`cn`):** cancel the incoming order's remaining quantity. The resting order stays, with its queue spot.
+  - **cancel oldest (`co`):** cancel the resting order and keep matching.
+  - **cancel both (`cb`):** cancel the resting order and the incoming order's remaining quantity.
+- **Not built:** decrement-and-cancel (CME): reduce the larger order by the smaller one's quantity and cancel the smaller. It's a
+  partial cancel with its own edge cases (equal quantities, an incoming order that decrements several resting orders) and adds little
+  to show. Listed under "Not built".
+
+### D69: The incoming order's action applies
+- **What:** the action comes from the incoming (taker) order, the way NASDAQ and CME do it. A resting order's own action doesn't matter
+  while someone else trades against it.
+- **The resting order still stores its action**, because a modify that re-prices it across the spread makes it the incoming order (D11).
+
+### D70: Where STP happens in matching
+- **What:** matching walks the book in price-time order exactly as before (D9). The check is per resting order, just before a fill:
+  same group → apply the action instead of trading. **A self-trade never prints.** Fills before that point stand.
+- **Event order:** the resting order's cancel first, then the incoming order's (for `cb`).
+- **What's left of a cancelled incoming order** is gone for good: it doesn't rest, even if it's a GTC limit.
+
+### D71: FOK and post-only with STP
+- **FOK** (D12) must fill completely or do nothing. With STP the pre-check changes:
+  - `co`: same-group orders don't count as fillable (they'd be cancelled, not traded). If the order can fill, matching cancels them on the way;
+    if it can't, nothing happens, and no resting order is cancelled.
+  - `cn` and `cb`: the check stops at the first same-group order, because matching would stop there. So a FOK order with `cn` or `cb`
+    either fills completely before reaching its own group or does nothing: it never emits an STP cancel.
+- **Fast book cost:** level totals (D21) can't see groups, so a grouped FOK order walks the orders it would hit: O(orders crossed).
+  An ungrouped FOK keeps the O(levels) check.
+- **Post-only** is unchanged: crossing any resting order, your own group included, is `WouldCross`. A post-only order never trades,
+  so it never gets to STP.
+
+### D72: The fast book's order still fits 32 bytes
+- **What:** `Node` gains `group: u16` and `stp: u8` (the action; 0 when there's no group): 8 (id) + 8 (qty) + 4 × 3 (level, prev, next)
+  + 2 + 1 + 1 (post-only) = 32 bytes. Two orders per cache line still holds (D34), and the compile-time `size_of` assert proves it.
+- **Alternative:** a `u32` group would make `Node` 40 bytes (36 rounded up to the 8-byte alignment), so a cache line would hold 1.6 orders.
+
+### D73: A new event and two new journal tags
+- **Event:** `SelfTradeCancelled { id, remaining }`, text `stp-cancelled <id> <remaining>`, event tag 6.
+  Alternative: a reason field on `Cancelled`, which would change the bytes, and so the digest, of every existing cancel.
+- **Text:** optional trailing `g=<group> stp=<cn|co|cb>` on `limit` and `market`, both or neither, so every grouped command has one spelling:
+  `limit 7 buy 10 100 ioc g=3 stp=co`.
+- **Journal:** new tags 5 (limit + `group u16 | action u8`, 30 bytes) and 6 (market + the same, 21 bytes), version 2.
+  Ungrouped commands keep tags 1 and 2 byte for byte, so the decoder reads version 1 files unchanged. One canonical encoding still holds (D50):
+  tag 5 or 6 with group 0 is invalid.
+  (This refines the consult's "append the fields to limit and market": separate tags cost ungrouped orders nothing and keep v1 readable for free.)

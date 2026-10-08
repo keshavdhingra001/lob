@@ -98,12 +98,14 @@ fn wide(seed: u64, n: usize, tick: i64) -> impl Iterator<Item = Command> {
                 qty,
                 price,
                 tif,
+                stp,
             } => Command::Limit {
                 id,
                 side,
                 qty,
                 price: moved(price),
                 tif,
+                stp,
             },
             Command::Modify { id, qty, price } => Command::Modify {
                 id,

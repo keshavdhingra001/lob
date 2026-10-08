@@ -165,6 +165,7 @@ impl Translator {
                 qty: Qty(shares),
                 price,
                 tif: TimeInForce::Gtc,
+                stp: None,
             },
             out,
         );
@@ -192,6 +193,7 @@ impl Translator {
                 qty: Qty(shares),
                 price,
                 tif: TimeInForce::Ioc,
+                stp: None,
             },
             out,
         );
@@ -284,7 +286,7 @@ impl Translator {
                 Event::Modified { id, qty, .. } => {
                     self.open.insert(id, qty.0);
                 }
-                Event::Cancelled { id, .. } => {
+                Event::Cancelled { id, .. } | Event::SelfTradeCancelled { id, .. } => {
                     self.open.remove(&id);
                 }
                 Event::Rejected { id, .. } => {

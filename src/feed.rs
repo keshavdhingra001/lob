@@ -186,7 +186,9 @@ impl Publisher {
                         qty,
                         ..
                     } if c == id => (side, Some(price), qty),
-                    Command::Market { id: c, side, qty } if c == id => (side, None, qty),
+                    Command::Market {
+                        id: c, side, qty, ..
+                    } if c == id => (side, None, qty),
                     _ => return Err("doesn't match the command".into()),
                 };
                 self.start_taker(Taker {
@@ -239,7 +241,7 @@ impl Publisher {
                     last: false,
                 });
             }
-            Event::Cancelled { id, remaining } => {
+            Event::Cancelled { id, remaining } | Event::SelfTradeCancelled { id, remaining } => {
                 let open = match self.taker {
                     Some(t) if t.id == id => {
                         self.taker = None;

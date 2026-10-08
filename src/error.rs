@@ -17,6 +17,8 @@ pub enum ParseError {
     BadSide(String),
     #[error("invalid time in force `{0}` (expected gtc, ioc, fok or post)")]
     BadTimeInForce(String),
+    #[error("invalid self-trade prevention `{0}` (expected g=<1-65535> stp=<cn|co|cb>)")]
+    BadStp(String),
     #[error("invalid {field} `{value}`")]
     BadNumber { field: &'static str, value: String },
 }

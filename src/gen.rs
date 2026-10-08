@@ -135,6 +135,7 @@ impl Generator {
             qty: Qty(qty),
             price: Price(price),
             tif,
+            stp: None,
         }
     }
 
@@ -211,6 +212,7 @@ impl Iterator for Generator {
                 id,
                 side,
                 qty: Qty(qty),
+                stp: None,
             }
         } else {
             self.passive()
@@ -233,6 +235,7 @@ pub fn deep_queue(n: u64, seed: u64) -> Vec<Command> {
             qty: Qty(1),
             price: Price(10_000),
             tif: TimeInForce::Gtc,
+            stp: None,
         })
         .collect();
     // Fisher-Yates shuffle, so cancels hit the front, middle and back of the queue.

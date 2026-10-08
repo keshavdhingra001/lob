@@ -84,11 +84,13 @@ fn session(ops: &[Op]) -> Vec<Command> {
                 qty: Qty(qty),
                 price: Price(price),
                 tif,
+                stp: None,
             },
             Op::Market(id, side, qty) => Command::Market {
                 id: new_id(id, &mut next),
                 side,
                 qty: Qty(qty),
+                stp: None,
             },
             Op::Modify(t, qty, price) => Command::Modify {
                 id: recent(t, next),
