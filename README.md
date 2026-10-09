@@ -1,13 +1,16 @@
 # lob
 
+[![CI](https://github.com/keshavdhingra001/lob/actions/workflows/ci.yml/badge.svg)](https://github.com/keshavdhingra001/lob/actions/workflows/ci.yml)
+
 A limit order book and matching engine in Rust, built from scratch as a study of how exchanges match orders and how to make that
 fast, deterministic and provably correct. It has price-time priority matching with the order types real venues offer (IOC, FOK,
 post-only, self-trade prevention, icebergs), deterministic replay, crash recovery, a lock-free three-thread pipeline and an L2 market
 data feed, and it uses a real NASDAQ trading day as test input. Two book implementations, a simple one and a fast one, must produce the
 same events for every command, and every performance claim cites a measurement.
 
-**Status:** active. Milestones M0–M15 are built (below); the next stage puts the engine on a network: a binary order-entry protocol over
-TCP, wire-to-wire latency, multicast market data. Design decisions are logged as they're made in [DESIGN.md](DESIGN.md) (D1–D89).
+**Status:** milestones M0–M15 are complete: a correct, measured, crash-safe single-symbol engine. A further stage that would put it on a
+network (binary order entry over TCP, wire-to-wire latency, multicast market data) is designed in outline but not started; see the roadmap.
+Every design decision is logged in [DESIGN.md](DESIGN.md) (D1–D89).
 
 ## Results
 
@@ -211,7 +214,7 @@ Built, each with its decisions in [DESIGN.md](DESIGN.md):
 - [x] **M14** Crash recovery: snapshots, group commit, recovery proved at every crash point and against SIGKILL
 - [x] **M15** Iceberg orders
 
-Planned next (each starts with its own design review):
+Possible next steps (not started; each would begin with its own design review):
 
 - [ ] **M16** Binary order-entry protocol (OUCH-like) over TCP, with sessions, sequence numbers and client order tokens
 - [ ] **M17** Wire-to-wire latency: socket in to socket out, tuned one change at a time
@@ -229,4 +232,4 @@ Limits that will apply to the network numbers: one laptop, loopback only, no ker
 
 ## License
 
-MIT (declared in `Cargo.toml`).
+[MIT](LICENSE).

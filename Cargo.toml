@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "A price-time priority limit order book and matching engine with deterministic replay"
 license = "MIT"
+repository = "https://github.com/keshavdhingra001/lob"
+readme = "README.md"
+keywords = ["order-book", "matching-engine", "trading", "low-latency", "itch"]
+categories = ["finance"]
 
 [dependencies]
 crc32fast = "1"
